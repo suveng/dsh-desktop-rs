@@ -213,14 +213,15 @@ fn host_command(cli: &Cli) -> (PathBuf, Vec<String>) {
     if let Some(path) = &cli.host_program {
         return (path.clone(), Vec::new());
     }
+    // 源码工作区里 `dsh` 全局装的往往是旧版（0.1.x）。工作区编译产物既新又快
+    // （就绪 785ms vs `pnpm dsh` 1885ms），所以它优先于 PATH 里的同名命令。
+    if let Some(entry) = compiled_harness_entry(cli) {
+        return (PathBuf::from("node"), vec![entry.display().to_string()]);
+    }
     if let Some(path) = which("dsh") {
         return (path, Vec::new());
     }
-    // 源码工作区：优先跑编译产物（~0.8s 就绪），退而求其次才走 pnpm（~1.9s）。
-    match compiled_harness_entry(cli) {
-        Some(entry) => (PathBuf::from("node"), vec![entry.display().to_string()]),
-        None => (PathBuf::from("pnpm"), vec!["dsh".to_owned()]),
-    }
+    (PathBuf::from("pnpm"), vec!["dsh".to_owned()])
 }
 
 /// 支持区间的下界（`architecture.md` D7）。

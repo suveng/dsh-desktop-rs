@@ -14,7 +14,7 @@
 | 无残留宿主 | ✅ | 同上；`Drop` + 信号处理器双保险 |
 | 失败页面 | ✅ | `docs/spike/m1-failure-page.png`：一句话结论 + 可复制诊断 + 三个按钮 |
 | 窗口状态记忆 | ✅ | 1440×900 逻辑（2880×1800 物理）写入 `$XDG_STATE_HOME/dsh-desktop-rs/window.json`，重启后几何一致 |
-| fmt / clippy / test | ✅ | `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 干净；当时 14 个测试全绿（后续 M2/D7 追加到 18 个） |
+| fmt / clippy / test | ✅ | `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 干净；当时 14 个测试全绿（后续 M2 / D7 / 桌面集成追加到 22 个） |
 
 ## 2. 结构
 

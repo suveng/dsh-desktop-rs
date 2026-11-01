@@ -45,11 +45,11 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 壳按这个顺序找宿主：
 
 1. `--host-cmd "pnpm dsh"` / `--host-program <路径>`（显式指定）
-2. `PATH` 里的 `dsh`
-3. `<cwd>/apps/cli/lib/bin.js`（dsh 源码工作区的编译产物，**就绪只要 ~0.8s**）
+2. `<cwd>/apps/cli/lib/bin.js`（dsh 源码工作区的编译产物，**就绪只要 ~0.8s**）
+3. `PATH` 里的 `dsh`（注意：全局安装的往往是 0.1.x 旧版）
 4. `pnpm dsh`
 
-推荐第 3 种：它比 `pnpm dsh`（~1.9s）快一倍以上，也是崩溃恢复能进 2 秒的前提。
+推荐第 2 种：它比 `pnpm dsh`（~1.9s）快一倍以上，也是崩溃恢复能进 2 秒的前提。
 
 启动时会跑一次 `dsh --version`：落在 `>=0.2.2-alpha.2 <0.3` 之外不会拦你，但会在日志与窗口标题上说明。
 
