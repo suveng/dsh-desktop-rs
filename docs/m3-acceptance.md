@@ -33,6 +33,7 @@
 | install.sh 无 root 安装 | ✅ | `PREFIX=/tmp/...` 安装出 bin + desktop + 3 个尺寸图标 + MIME 数据库；二进制可执行 |
 | install.sh 卸载干净 | ✅ | `--uninstall` 后 `find … | grep -i dsh` 为空 |
 | 系统环境已复原 | ✅ | `dpkg -s dsh-desktop` → 未安装；`/usr/bin/dsh-desktop` 不存在 |
+| **容器内「从桌面入口启动」** | ✅ | 容器里装 `xvfb + openbox + libgtk-3-bin`，用 `gtk-launch dsh-desktop`（走 `.desktop` 的 `Exec`）拉起 → `MENU_LAUNCH_OK`；日志显示它正常降级（容器无 D-Bus → 通知不可用；无 `dsh` → 回退 `pnpm`） |
 | **干净容器 `dpkg -i`** | ✅ | `podman run ubuntu:24.04`（全新容器）内 `apt-get install ./dsh-desktop_0.1.0_amd64.deb` → `install_exit=0`，`dsh-desktop --version` → `0.1.0`（`RUN_OK`），`/usr/share/applications/dsh-desktop.desktop` 存在 |
 
 **这些都不是「看起来对」**：deb 是真 `dpkg -i` 装进系统、真从 `/usr/bin` 跑的；验证完已经 `dpkg -r` 卸掉，机器状态与开始时一致。
