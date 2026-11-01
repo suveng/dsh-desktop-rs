@@ -1,0 +1,19 @@
+[package]
+name = "dsh-desktop"
+description = "Rust desktop shell for DeepSeek Harness (Linux)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "dsh-desktop"
+path = "src/main.rs"
+
+[dependencies]
+dsh-platform.workspace = true
+dsh-supervisor.workspace = true
+libc = "0.2.191"
+tao = "0.37.2"
+wry = "0.57.1"

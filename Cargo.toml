@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/bin", "crates/platform", "crates/supervisor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/suveng/dsh-desktop-rs"
+
+[workspace.dependencies]
+dsh-desktop = { path = "crates/bin", package = "dsh-desktop" }
+dsh-platform = { path = "crates/platform" }
+dsh-supervisor = { path = "crates/supervisor" }
+
+[profile.dev.package."*"]
+# GUI 依赖在 dev 下也要优化，否则启动明显发卡（desigma 的同款取舍）。
+opt-level = 2
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"

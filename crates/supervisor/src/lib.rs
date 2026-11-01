@@ -1,0 +1,430 @@
+//! 宿主进程监督：spawn `dsh --profile web`，把它的 stdio 变成生命周期事件。
+//!
+//! 设计约束（见 `docs/architecture.md` D3/D6）：
+//! - 就绪信号是 stdout 上的 `dsh web: <url>` 行 —— 上游源码注释明确这是给 supervisor 的契约。
+//! - 对外只有**同步** API：事件通道 + `poll()`。本 crate 内部不引入 async runtime，
+//!   UI 线程每帧 drain 一次即可，不存在 `.await` 泄漏到上层。
+//! - 带 token 的 URL 不实现 `Display` 的裸输出：`Debug` 一律脱敏（R4）。
+
+use std::fmt;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// 上游打印就绪 URL 的前缀（`packages/bundle/web-app/src/index.ts:231`）。
+pub const READY_PREFIX: &str = "dsh web: ";
+
+/// `startup.ts` 侧没有超时，这个值只是壳的耐心。
+pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 优雅关闭窗口：先 SIGTERM 整个进程组，超时再 SIGKILL。
+pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// 日志流来源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
+/// 宿主生命周期事件。
+#[derive(Debug)]
+pub enum Event {
+    /// 子进程已创建。
+    Starting { pid: u32 },
+    /// 拿到就绪 URL。只会出现一次。
+    Ready(ReadyUrl),
+    /// 一行日志（已脱敏）。
+    Log { stream: Stream, line: String },
+    /// 子进程退出。
+    Exited { code: Option<i32> },
+    /// 监督层判定失败（超时、无法解析等）。之后不会再有就绪事件。
+    Failed(String),
+    /// `stop()` 完成。
+    Stopped,
+}
+
+/// 带鉴权 token 的本地 URL。
+///
+/// `Debug` / `Display` 都只输出脱敏形式；要拿真实值必须显式调 `as_str()`，
+/// 这样 grep `format!("{:?}", url)` 之类的意外泄漏会在 code review 里立刻暴露。
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReadyUrl(String);
+
+impl ReadyUrl {
+    /// 解析一行 `dsh web: http://127.0.0.1:PORT/?token=...`。
+    ///
+    /// 只接受 `http(s)://` 开头；空 token 也接受（上游未来可能改成 cookie-only）。
+    pub fn parse(line: &str) -> Option<Self> {
+        let rest = line.trim().strip_prefix(READY_PREFIX)?.trim();
+        if !(rest.starts_with("http://") || rest.starts_with("https://")) {
+            return None;
+        }
+        Some(Self(rest.to_owned()))
+    }
+
+    /// 真实 URL。**不要**写进日志、窗口标题或磁盘。
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `scheme://authority` 部分，可安全展示。
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        let s = &self.0;
+        let scheme_end = s.find("://").map_or(0, |i| i + 3);
+        match s[scheme_end..].find('/') {
+            Some(i) => &s[..scheme_end + i],
+            None => s,
+        }
+    }
+
+    /// 脱敏后的可展示形式。
+    #[must_use]
+    pub fn redacted(&self) -> String {
+        format!("{}/?token=<redacted>", self.origin())
+    }
+}
+
+impl fmt::Debug for ReadyUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ReadyUrl(")?;
+        f.write_str(&self.redacted())?;
+        f.write_str(")")
+    }
+}
+
+impl fmt::Display for ReadyUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.redacted())
+    }
+}
+
+/// 把任意文本里 `token=<value>` 的值遮掉，用于转发宿主日志。
+#[must_use]
+pub fn redact(line: &str) -> String {
+    const KEY: &str = "token=";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(idx) = rest.find(KEY) {
+        let (head, tail) = rest.split_at(idx + KEY.len());
+        out.push_str(head);
+        let end = tail
+            .find(['&', ' ', '\t', '"', '\'', '\\'])
+            .unwrap_or(tail.len());
+        out.push_str("<redacted>");
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 如何拉起宿主。
+#[derive(Clone, Debug)]
+pub struct LaunchSpec {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    ready_timeout: Duration,
+    stop_grace: Duration,
+}
+
+impl LaunchSpec {
+    #[must_use]
+    pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            ready_timeout: DEFAULT_READY_TIMEOUT,
+            stop_grace: DEFAULT_STOP_GRACE,
+        }
+    }
+
+    /// `dsh --profile web` 的标准形状。
+    #[must_use]
+    pub fn web(program: impl Into<PathBuf>) -> Self {
+        Self::new(program).args([
+            "--profile",
+            "web",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--no-open",
+        ])
+    }
+
+    #[must_use]
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    #[must_use]
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn ready_timeout(mut self, timeout: Duration) -> Self {
+        self.ready_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn stop_grace(mut self, grace: Duration) -> Self {
+        self.stop_grace = grace;
+        self
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &PathBuf {
+        &self.program
+    }
+
+    /// 命令行，脱敏后可用于诊断。
+    #[must_use]
+    pub fn command_line(&self) -> String {
+        let mut s = self.program.display().to_string();
+        for a in &self.args {
+            s.push(' ');
+            s.push_str(a);
+        }
+        redact(&s)
+    }
+}
+
+/// 一个被监督的宿主进程。
+///
+/// `Drop` 会调用 `stop()`，所以「窗口关了但宿主还在」需要显式 `mem::forget` 才做得到 ——
+/// 这是刻意的，孤儿进程比多跑一次关闭流程要糟得多。
+pub struct Host {
+    child: Child,
+    pid: u32,
+    events: Receiver<Event>,
+    ready: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    spec: LaunchSpec,
+    stop_done: bool,
+}
+
+impl Host {
+    /// 拉起源宿主。返回时子进程已创建，就绪事件稍后从 `poll()` 里出来。
+    pub fn spawn(spec: LaunchSpec) -> std::io::Result<Self> {
+        let mut cmd = Command::new(&spec.program);
+        cmd.args(&spec.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(dir) = &spec.cwd {
+            cmd.current_dir(dir);
+        }
+
+        #[cfg(unix)]
+        {
+            // SAFETY: 只在 fork 与 exec 之间跑，只调用 async-signal-safe 的 libc 函数。
+            unsafe {
+                use std::os::unix::process::CommandExt as _;
+                cmd.pre_exec(|| {
+                    // 独立进程组：关闭时可以对整个树一次性发信号。
+                    if libc::setpgid(0, 0) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // 壳被 kill -9 时宿主也随之退出，避免孤儿。
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
+        let (tx, rx) = channel::<Event>();
+        let ready = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let _ = tx.send(Event::Starting { pid });
+
+        if let Some(out) = child.stdout.take() {
+            pump(out, Stream::Stdout, tx.clone(), Arc::clone(&ready));
+        }
+        if let Some(err) = child.stderr.take() {
+            pump(err, Stream::Stderr, tx.clone(), Arc::clone(&ready));
+        }
+
+        spawn_ready_watchdog(
+            spec.ready_timeout,
+            Arc::clone(&ready),
+            Arc::clone(&exited),
+            tx,
+        );
+
+        Ok(Self {
+            child,
+            pid,
+            events: rx,
+            ready,
+            exited,
+            spec,
+            stop_done: false,
+        })
+    }
+
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn spec(&self) -> &LaunchSpec {
+        &self.spec
+    }
+
+    /// drain 所有已到达的事件；顺带检查子进程是否已退出。
+    ///
+    /// 调用方每帧调一次即可（GUI 主循环 / 测试轮询都适用）。
+    pub fn poll(&mut self) -> Vec<Event> {
+        let mut out = Vec::new();
+        while let Ok(ev) = self.events.try_recv() {
+            out.push(ev);
+        }
+        if !self.exited.load(Ordering::Relaxed) {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    self.exited.store(true, Ordering::Relaxed);
+                    out.push(Event::Exited {
+                        code: exit_code(&status),
+                    });
+                }
+                Ok(None) => {}
+                Err(err) => out.push(Event::Failed(format!("等待宿主退出失败：{err}"))),
+            }
+        }
+        out
+    }
+
+    /// 阻塞等一个事件（测试与启动期用）。
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Event> {
+        self.events.recv_timeout(timeout).ok()
+    }
+
+    /// 优雅关闭：SIGTERM 进程组 → 等 `stop_grace` → SIGKILL 进程组。
+    pub fn stop(&mut self) {
+        if self.stop_done {
+            return;
+        }
+        self.stop_done = true;
+
+        #[cfg(unix)]
+        signal_group(self.pid, libc::SIGTERM);
+
+        let deadline = Instant::now() + self.spec.stop_grace;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+
+        // 直接子进程可能已退出、组里还有孙进程；也可能反过来。两者都补一发。
+        if self.child.try_wait().ok().flatten().is_none() {
+            #[cfg(unix)]
+            signal_group(self.pid, libc::SIGKILL);
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        #[cfg(unix)]
+        signal_group(self.pid, libc::SIGKILL);
+
+        self.exited.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn exit_code(status: &ExitStatus) -> Option<i32> {
+    status.code()
+}
+
+fn pump<R>(reader: R, stream: Stream, tx: Sender<Event>, ready: Arc<AtomicBool>)
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let buf = BufReader::new(reader);
+        for line in buf.lines() {
+            let Ok(line) = line else { break };
+            if !ready.load(Ordering::Relaxed)
+                && let Some(url) = ReadyUrl::parse(&line)
+            {
+                ready.store(true, Ordering::Relaxed);
+                let _ = tx.send(Event::Log {
+                    stream,
+                    line: url.redacted(),
+                });
+                let _ = tx.send(Event::Ready(url));
+                continue;
+            }
+            let _ = tx.send(Event::Log {
+                stream,
+                line: redact(&line),
+            });
+        }
+    });
+}
+
+fn spawn_ready_watchdog(
+    timeout: Duration,
+    ready: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    tx: Sender<Event>,
+) {
+    thread::spawn(move || {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if ready.load(Ordering::Relaxed) || exited.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        if ready.load(Ordering::Relaxed) || exited.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = tx.send(Event::Failed(format!(
+            "宿主在 {} 秒内没有打印就绪 URL（`{READY_PREFIX}…`）。可能是不兼容的 dsh 版本，或 Profile 初始化失败。",
+            timeout.as_secs()
+        )));
+    });
+}
+
+#[cfg(unix)]
+fn signal_group(pid: u32, sig: i32) {
+    // SAFETY: kill 只读两个整数参数；负 pid 表示「发给这个进程组」。
+    unsafe {
+        libc::kill(-(pid as i32), sig);
+    }
+}

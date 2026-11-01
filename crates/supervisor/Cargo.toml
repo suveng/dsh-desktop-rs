@@ -1,0 +1,13 @@
+[package]
+name = "dsh-supervisor"
+description = "Spawns the dsh Host and turns its stdio into lifecycle events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
