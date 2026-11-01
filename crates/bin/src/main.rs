@@ -30,6 +30,44 @@ const SKELETON: &str = include_str!("../assets/skeleton.html");
 const FAILURE: &str = include_str!("../assets/failure.html");
 const SHIM: &str = include_str!("../assets/shim.js");
 
+/// `DSH_DESKTOP_DEBUG_DOM=1` 时注入：点完 700ms 把浮层 DOM 的样式/文本打回壳里。
+/// 强制一次合成提交：先改一点再复原，浏览器必须重新合成整页。
+const NUDGE: &str = r#"
+(function () {
+  var d = document.documentElement;
+  if (!d || window.__dshNudge) return;
+  window.__dshNudge = true;
+  d.style.opacity = '0.999';
+  requestAnimationFrame(function () {
+    d.style.opacity = '';
+    window.__dshNudge = false;
+  });
+})();
+"#;
+
+const DEBUG_DOM: &str = r#"
+(function () {
+  document.addEventListener('click', function (ev) {
+    setTimeout(function () {
+      var els = Array.prototype.slice.call(document.querySelectorAll(
+        '[role="menu"],[data-radix-popper-content-wrapper],[role="dialog"],[class*="opover"],[class*="overlay"],[class*="Overlay"]'));
+      var data = els.map(function (m) {
+        var r = m.getBoundingClientRect(), cs = getComputedStyle(m);
+        return {
+          cls: (m.className || '').toString().slice(0, 50),
+          text: (m.innerText || '').trim().slice(0, 60),
+          rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+          op: cs.opacity, vis: cs.visibility, disp: cs.display,
+          blur: cs.backdropFilter, z: cs.zIndex, kids: m.children.length,
+        };
+      });
+      var label = (ev.target && ev.target.getAttribute && ev.target.getAttribute('aria-label')) || (ev.target && ev.target.tagName) || '';
+      window.ipc.postMessage(JSON.stringify({ kind: 'debug-dom', id: 901, data: { target: label, els: data } }));
+    }, 700);
+  }, true);
+})();
+"#;
+
 /// 轮询宿主的间隔。10 Hz 足够让「就绪 → 加载页面」看起来是即时的，又不会空转。
 const TICK: Duration = Duration::from_millis(100);
 
@@ -518,6 +556,11 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let builder = WebViewBuilder::new()
         .with_html(SKELETON)
         .with_initialization_script(SHIM)
+        .with_initialization_script(
+            std::env::var_os("DSH_DESKTOP_DEBUG_DOM")
+                .map(|_| DEBUG_DOM)
+                .unwrap_or_default(),
+        )
         // 返回 false：保留 DOM 默认的 drop 行为（前端要靠它拿到 File），
         // 我们只是顺手记下原生路径，供 `__DSH_HOST_PATHS__.pathFor()` 查。
         .with_drag_drop_handler(move |event| {
@@ -983,6 +1026,23 @@ impl App {
                 if let Some(url) = self.update_status.url.clone() {
                     spawn_detached("xdg-open", &[&url]);
                 }
+                self.resolve(id, true, &serde_json::Value::Null);
+            }
+            "clicked" => {
+                // 可关：某些机器上刷新反而闪。
+                if std::env::var_os("DSH_DESKTOP_NO_REPAINT_NUDGE").is_none() {
+                    self.webview.evaluate_script(NUDGE).ok();
+                }
+                self.resolve(id, true, &serde_json::Value::Null);
+            }
+            "debug-dom" => {
+                eprintln!(
+                    "DOM-DEBUG {}",
+                    request
+                        .get("data")
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "null".to_owned())
+                );
                 self.resolve(id, true, &serde_json::Value::Null);
             }
             "probe-menu" => {

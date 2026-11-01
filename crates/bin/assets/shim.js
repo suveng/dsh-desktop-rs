@@ -121,5 +121,19 @@
     },
   });
 
+  // 点击上报：WebKitGTK 在新建合成层（带 backdrop-filter 的浮层）时可能不立即上屏，
+  // 壳收到这个通知后会做一次无副作用的合成刷新（见 main.rs 的 NUDGE）。
+  document.addEventListener(
+    'click',
+    () => {
+      try {
+        window.ipc.postMessage(JSON.stringify({ kind: 'clicked', id: 0 }));
+      } catch (_error) {
+        /* 没有 ipc 的场合（普通浏览器）忽略 */
+      }
+    },
+    true,
+  );
+
   document.documentElement.setAttribute('data-dsh-desktop-shim', '1');
 })();
