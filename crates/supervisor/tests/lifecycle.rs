@@ -1,3 +1,6 @@
+#![cfg(unix)]
+// 用假 shell 脚本驱动，unix-only。
+
 //! supervisor 的状态机测试。全部无窗口、无网络 —— 用假的 `dsh` 脚本驱动。
 
 use std::fs;

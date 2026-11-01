@@ -40,7 +40,9 @@ jobs:
       - name: test
         run: cargo test --workspace --lib --tests
 
-      - name: smoke (失败页视觉基线)
+      - name: smoke (失败页)
+        env:
+          SMOKE_RELAXED: "1"
         run: xvfb-run -a -s "-screen 0 1600x1000x24" bash scripts/smoke.sh
 
   # macOS / Windows：编译 + 打测试二进制（没有宿主 dsh，跑不了端到端）

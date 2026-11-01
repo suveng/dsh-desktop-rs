@@ -192,7 +192,9 @@ impl MenuBar {
         #[cfg(target_os = "macos")]
         let result = {
             let _ = window;
-            self.menu.init_for_nsapp()
+            // macOS 的菜单是应用级的，init_for_nsapp 不返回 Result。
+            self.menu.init_for_nsapp();
+            Ok(())
         };
         #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         let result = {
