@@ -1,0 +1,22 @@
+name: Bug report
+description: 应用行为异常
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 现象 + 期望行为
+    validations: { required: true }
+  - type: textarea
+    id: env
+    attributes:
+      label: 环境
+      description: 发行版、桌面环境、`dsh --version`、`dsh-desktop --version`、是否在源码工作区运行
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 应用 stderr + 失败页上的诊断块（**请先确认没有 token**）
+    validations: { required: false }

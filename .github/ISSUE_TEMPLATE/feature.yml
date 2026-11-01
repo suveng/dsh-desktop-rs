@@ -1,0 +1,15 @@
+name: Feature request
+description: 想要的能力
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: 要解决什么问题
+    validations: { required: true }
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你设想的方案
+      description: 如果涉及新的原生能力，说明它是否需要探测降级（参考 ADR-D8）
+    validations: { required: false }
