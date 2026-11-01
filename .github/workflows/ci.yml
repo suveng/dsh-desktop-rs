@@ -40,6 +40,9 @@ jobs:
       - name: test
         run: cargo test --workspace --lib --tests
 
+      - name: build
+        run: cargo build --workspace
+
       - name: smoke (失败页)
         env:
           SMOKE_RELAXED: "1"
