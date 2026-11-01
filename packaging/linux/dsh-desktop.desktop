@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=DeepSeek Harness
+Name[zh_CN]=DeepSeek Harness
+GenericName=AI Agent Workspace
+Comment=DeepSeek Harness desktop shell
+Comment[zh_CN]=DeepSeek Harness 桌面客户端
+Exec=dsh-desktop %u
+Icon=dsh-desktop
+Terminal=false
+Categories=Development;IDE;
+Keywords=dsh;deepseek;harness;agent;ai;
+StartupWMClass=dsh-desktop
+StartupNotify=true
+MimeType=x-scheme-handler/dsh;

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  dsh:// 交给 dsh-desktop 处理（architecture.md §7-15）。
+  安装后需要 `update-mime-database ~/.local/share/mime` 与
+  `xdg-mime default dsh-desktop.desktop x-scheme-handler/dsh`。
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="x-scheme-handler/dsh">
+    <comment>DeepSeek Harness link</comment>
+    <comment xml:lang="zh_CN">DeepSeek Harness 链接</comment>
+    <icon name="dsh-desktop"/>
+    <glob pattern="dsh://*"/>
+  </mime-type>
+</mime-info>

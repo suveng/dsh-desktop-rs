@@ -1,3 +1,5 @@
 /target
+/dist
 *.png
 !/docs/spike/*.png
+!/packaging/linux/icons/*.png

@@ -125,6 +125,19 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 ---
 
+### D8 托盘与系统通知推迟到 0.2
+
+**决定**：0.1.0 不做托盘图标、全局热键、系统通知。
+
+**理由**：
+- 本机会话（`DISPLAY=:0`，无窗口管理器、无 `org.kde.StatusNotifierWatcher`）**无法验证**托盘行为。按 M0 的教训（`docs/spike-webkitgtk.md` §4-2），不能验证的能力不该先写进去。
+- 系统通知需要注册 `GApplication` id，而我们已经有独立的单实例模型（D5），两套「谁是主实例」的机制会互相打架；正确做法是先让单实例成为通知的宿主，再挂 `org.freedesktop.Notifications`。
+- 这两项都是「有更好、没有也能用」的能力，而 0.1.0 的价值在「Linux 上第一次能装上就用」。
+
+**被否决的方案**：直接加 `tray-icon` + `notify-rust` 并「在 GNOME 上可能不显示」——等于把不可验证的风险塞给用户。
+
+**回归条件**：有了带 WM 与 StatusNotifier 的测试环境后，按 §7 的 #6 / #11 补齐，并在 `docs/` 里补一份 M4 验收。
+
 ## 4. 架构
 
 ```
@@ -228,16 +241,16 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 | 3 | 自定义 `dsh-app://`、反代、header 重写 | **不做**（D2） | — |
 | 4 | 单实例 | 文件锁 + loopback（D5） | M2 |
 | 5 | 原生菜单 | `muda` | M2 |
-| 6 | 托盘 | `tray-icon`（GNOME 需 AppIndicator 扩展，缺失则隐藏菜单项） | M3 |
+| 6 | 托盘 | **未实现**：本机会话没有 `StatusNotifierWatcher`，无法验证；推迟的理由与被否决方案见 [ADR-D8](#d8-托盘与系统通知推迟到-02) | — |
 | 7 | 自动更新 | 检查 `download.deepseek.com` 清单；M3 只做「有新版就提示 + 打开下载页」 | M3 |
 | 8 | 原生目录选择 `__DSH_DIRECTORY_PICKER__` | shim → GTK `FileChooser`（`rfd`） | M2 |
 | 9 | 文件拖拽取真实路径 `__DSH_HOST_PATHS__` | **见 R2**：webview 拿不到 `File.path`，改由原生 GTK drop 目标捕获路径后注入 | M3 |
 | 10 | 设备信息 `deviceInfo()` | 读 `/etc/os-release` + CPU/内存 | M2 |
-| 11 | 快捷键系统 `keyboard` / `shortcuts` | 桥接到 `global-hotkey`，存储复用 dsh 设置 | M3 |
+| 11 | 快捷键系统 `keyboard` / `shortcuts` | 只做了**壳级快捷键**（菜单加速键，来自 `bindings()` 表）；全局热键与前端快捷键配置桥接未做，见 ADR-D8 | 部分 |
 | 12 | 内嵌浏览器分区 `browser` | **不做**：外链走系统浏览器；`ui-sidebar-browser` 退化为普通 iframe | — |
 | 13 | 崩溃恢复 | 宿主重启 + 上一次会话 URL 恢复 | M2 |
 | 14 | 窗口状态记忆 | `$XDG_STATE_HOME/dsh-desktop-rs/window.json` | M1 |
-| 15 | 深链（`dsh://`） | `xdg-mime` 注册 + `Exec=dsh-desktop-rs %u` | M3 |
+| 15 | 深链（`dsh://`） | ✅ 已实现：`xdg-mime` 注册 + `Exec=dsh-desktop %u`；映射规则 `dsh://x/y` → `<origin>/x/y` | M3 |
 
 ---
 
@@ -327,7 +340,7 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **验收**：第二次启动只聚焦已有窗口；`dsh://` 链接能唤起；菜单项与快捷键全部可用；`kill -9` 宿主后 2 秒内自动恢复。
 
-### M3 分发（3–5 天）
+### M3 分发（3–5 天）—— ✅ 已完成（2026-11-01），见 [`docs/m3-acceptance.md`](m3-acceptance.md)
 
 AppImage + `.deb` + `.tar.gz`；`.desktop` + MIME 注册；图标；托盘（有扩展时）；更新提示；`--screenshot` 类调试开关。
 
