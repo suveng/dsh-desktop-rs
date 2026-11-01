@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # GUI 栈（wry/tao/muda/tray-icon）版本互相咬合，拆开升级会编译不过。
+      gui-stack:
+        patterns: ["wry", "tao", "muda", "tray-icon", "gtk", "webkit2gtk"]
+      rest:
+        patterns: ["*"]
+        exclude-patterns: ["wry", "tao", "muda", "tray-icon", "gtk", "webkit2gtk"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
