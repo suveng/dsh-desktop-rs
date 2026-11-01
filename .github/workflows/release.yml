@@ -108,7 +108,7 @@ jobs:
             <Product Id="*" Name="DeepSeek Harness" Language="1033" Version="$version"
                      Manufacturer="dsh-desktop contributors" UpgradeCode="7E1B4C62-3C1F-4B8E-9F21-0C5C9B7A2F11">
               <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"/>
-              <MajorUpgrade DowngradeErrorMessage="已安装更新版本，请先卸载。" />
+              <MajorUpgrade DowngradeErrorMessage="A newer version is already installed. Please uninstall it first." />
               <MediaTemplate EmbedCab="yes"/>
               <Directory Id="TARGETDIR" Name="SourceDir">
                 <Directory Id="ProgramFiles64Folder">
