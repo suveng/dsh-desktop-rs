@@ -90,17 +90,21 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 
 诊断信息在 `$XDG_STATE_HOME/dsh-desktop-rs/`，窗口几何在 `window.json`。
 
-## 已知问题：菜单/浮层只显示空白框（已修复）
+## 已知问题：菜单/浮层只显示空白框（v0.1.3 已修）
 
-症状：点工作区「…」或会话「⋮」，弹出一个**有边框、有尺寸、但没有文字**的半透明框；鼠标移开再移回来、或切换一下窗口，内容才出现。
+症状：点工作区「…」或会话「⋮」，弹出一个**有边框、有尺寸、但没有文字**的半透明框；切一下窗口内容才出现。
 
-原因不在 dsh 前端，而在 **WebKitGTK 的 DMA-BUF 渲染器**：dsh 的菜单表面带 `backdrop-filter`（`packages/client/ui-primitives/lib/MenuSurface.module.css:27`），这类元素会被提成独立合成层，而 DMA-BUF 路径在某些驱动/会话下**只画模糊底、不画该层的内容**，并且只在收到下一次重绘时才补上。
+根因不在 dsh，也不在合成器，而在**动画时钟**：dsh 的菜单给子元素套了入场淡入
+（`packages/client/ui-primitives/src/MenuSurface.module.css:61`，keyframes 从 `opacity: 0` 开始）。
+在没有窗口管理器的 X 会话里窗口永远不会 active，WebKitGTK 不推进 CSS 动画时钟，元素就停在
+`from` 帧——布局尺寸全对（devtools 里是 `100px × 20px`），只是透明。切窗口会触发一次焦点事件，
+时钟启动、淡入走完，于是"字出来了"。
 
-壳的处理：启动时默认设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`（你自己显式设置过就不覆盖）。代价是合成路径变保守，几乎无可感知的性能损失；换来的是浮层稳定可见。若你的机器上仍然异常，再叠加：
+壳的处理：注入 `[data-menu-phase] > * { animation: none !important }`，元素渲染即不透明。
+代价只有菜单没有淡入过渡，毛玻璃/阴影/圆角都保留。想恢复动画用
+`DSH_DESKTOP_KEEP_MENU_ANIMATION=1`。
 
-```bash
-WEBKIT_DISABLE_COMPOSITING_MODE=1 dsh-desktop
-```
+完整记录（含五个被证伪的假设）见 [`docs/known-issues.md`](docs/known-issues.md)。
 
 ## 从源码构建
 

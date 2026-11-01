@@ -31,39 +31,71 @@ const FAILURE: &str = include_str!("../assets/failure.html");
 const SHIM: &str = include_str!("../assets/shim.js");
 
 /// `DSH_DESKTOP_DEBUG_DOM=1` 时注入：点完 700ms 把浮层 DOM 的样式/文本打回壳里。
-/// 强制一次合成提交：先改一点再复原，浏览器必须重新合成整页。
-const NUDGE: &str = r#"
+/// 浮层入场动画在「窗口从未获得焦点」的环境（比如没有窗口管理器）里不会推进，
+/// 于是子元素永远停在 keyframes 的 from 帧（opacity: 0）—— 布局、尺寸全对但字看不见。
+/// 这里把菜单的 enter/exit 动画关掉，element 渲染即不透明。
+const MENU_ANIM_FIX: &str = r#"
 (function () {
-  var d = document.documentElement;
-  if (!d || window.__dshNudge) return;
-  window.__dshNudge = true;
-  d.style.opacity = '0.999';
-  requestAnimationFrame(function () {
-    d.style.opacity = '';
-    window.__dshNudge = false;
-  });
+  var add = function () {
+    if (document.getElementById('dsh-desktop-no-menu-anim')) return;
+    var s = document.createElement('style');
+    s.id = 'dsh-desktop-no-menu-anim';
+    s.textContent = '[data-menu-phase] > *{animation:none !important}'
+      + '.backing[data-menu-phase]{animation:none !important}';
+    (document.head || document.documentElement).appendChild(s);
+  };
+  if (document.head) add(); else document.addEventListener('DOMContentLoaded', add, { once: true });
 })();
 "#;
 
 const DEBUG_DOM: &str = r#"
 (function () {
   document.addEventListener('click', function (ev) {
-    setTimeout(function () {
-      var els = Array.prototype.slice.call(document.querySelectorAll(
-        '[role="menu"],[data-radix-popper-content-wrapper],[role="dialog"],[class*="opover"],[class*="overlay"],[class*="Overlay"]'));
-      var data = els.map(function (m) {
-        var r = m.getBoundingClientRect(), cs = getComputedStyle(m);
-        return {
-          cls: (m.className || '').toString().slice(0, 50),
-          text: (m.innerText || '').trim().slice(0, 60),
-          rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
-          op: cs.opacity, vis: cs.visibility, disp: cs.display,
-          blur: cs.backdropFilter, z: cs.zIndex, kids: m.children.length,
-        };
+    var t = ev.target, label = '';
+    if (t) {
+      var n = t;
+      for (var i = 0; i < 4 && n; i++) {
+        var a = n.getAttribute && n.getAttribute('aria-label');
+        if (a) { label = a; break; }
+        n = n.parentElement;
+      }
+      if (!label) label = (t.tagName || '') + '.' + ((t.className || '').toString().slice(0, 24));
+    }
+    var added = [], changed = [];
+    var mo = new MutationObserver(function (recs) {
+      recs.forEach(function (r) {
+        if (r.type === 'childList') {
+          Array.prototype.forEach.call(r.addedNodes, function (n) {
+            if (n.nodeType !== 1) return;
+            var b = n.getBoundingClientRect();
+            added.push({ tag: n.tagName, cls: (n.className || '').toString().slice(0, 30),
+              text: (n.innerText || '').trim().slice(0, 44),
+              rect: [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)] });
+          });
+        } else if (r.type === 'attributes') {
+          var e = r.target;
+          if (e.nodeType !== 1) return;
+          var b2 = e.getBoundingClientRect(), cs = getComputedStyle(e);
+          changed.push({ cls: (e.className || '').toString().slice(0, 30), attr: r.attributeName,
+            text: (e.innerText || '').trim().slice(0, 44),
+            rect: [Math.round(b2.left), Math.round(b2.top), Math.round(b2.width), Math.round(b2.height)],
+            disp: cs.display, op: cs.opacity, vis: cs.visibility });
+        }
       });
-      var label = (ev.target && ev.target.getAttribute && ev.target.getAttribute('aria-label')) || (ev.target && ev.target.tagName) || '';
-      window.ipc.postMessage(JSON.stringify({ kind: 'debug-dom', id: 901, data: { target: label, els: data } }));
-    }, 700);
+    });
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'data-state', 'aria-expanded'] });
+    setTimeout(function () {
+      mo.disconnect();
+      var pops = document.querySelectorAll('[popover]').length;
+      var open = 0;
+      document.querySelectorAll('[popover]').forEach(function (e) { try { if (e.matches(':popover-open')) open++; } catch (_) {} });
+      window.ipc.postMessage(JSON.stringify({ kind: 'debug-dom', id: 901,
+        data: { target: label, addedCount: added.length, added: added.slice(0, 8),
+          changedCount: changed.length, changed: changed.slice(0, 8),
+          popovers: pops, popoversOpen: open,
+          bodyText: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 50) } }));
+    }, 3000);
   }, true);
 })();
 "#;
@@ -555,6 +587,13 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
 
     let builder = WebViewBuilder::new()
         .with_html(SKELETON)
+        .with_initialization_script(
+            if std::env::var_os("DSH_DESKTOP_KEEP_MENU_ANIMATION").is_some() {
+                ""
+            } else {
+                MENU_ANIM_FIX
+            },
+        )
         .with_initialization_script(SHIM)
         .with_initialization_script(
             std::env::var_os("DSH_DESKTOP_DEBUG_DOM")
@@ -1025,13 +1064,6 @@ impl App {
             "update-open" => {
                 if let Some(url) = self.update_status.url.clone() {
                     spawn_detached("xdg-open", &[&url]);
-                }
-                self.resolve(id, true, &serde_json::Value::Null);
-            }
-            "clicked" => {
-                // 可关：某些机器上刷新反而闪。
-                if std::env::var_os("DSH_DESKTOP_NO_REPAINT_NUDGE").is_none() {
-                    self.webview.evaluate_script(NUDGE).ok();
                 }
                 self.resolve(id, true, &serde_json::Value::Null);
             }
