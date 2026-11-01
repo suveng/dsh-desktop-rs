@@ -151,6 +151,8 @@ jobs:
           path: dist/*
 
   publish:
+    # workflow_dispatch 只做构建验证，不发布；真正的发布只由 tag 触发。
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [linux, macos, windows]
     runs-on: ubuntu-24.04
     steps:
