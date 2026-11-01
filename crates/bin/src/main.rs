@@ -700,11 +700,14 @@ impl App {
                     self.ready = true;
                     self.origin = Some(url.origin().to_owned());
                     self.ready_since = Some(Instant::now());
-                    self.navigate_deep_link();
+                    let target = self.navigate_deep_link();
                     self.start_update_check();
                     self.strip_token_from_location();
                     window.set_title(&self.title_for(APP_TITLE));
-                    if let Err(err) = self.webview.load_url(url.as_str()) {
+                    if let Err(err) = self
+                        .webview
+                        .load_url(target.as_deref().unwrap_or(url.as_str()))
+                    {
                         self.fail(
                             window,
                             "加载界面失败",
@@ -1147,7 +1150,9 @@ impl App {
                 }
                 Command::OpenUrl(url) => {
                     self.open_url = Some(url);
-                    self.navigate_deep_link();
+                    if self.ready {
+                        let _ = self.navigate_deep_link();
+                    }
                     self.start_update_check();
                     self.strip_token_from_location();
                 }
@@ -1158,19 +1163,18 @@ impl App {
     /// `dsh://x/y?z` → `<origin>/x/y?z`。
     ///
     /// dsh 前端没有对外文档化的路由，所以这条映射是壳自己的约定（见 `architecture.md` §7-15）。
-    fn navigate_deep_link(&mut self) {
-        let (Some(origin), Some(raw)) = (self.origin.as_deref(), self.open_url.as_deref()) else {
-            return;
-        };
-        if !self.ready {
-            return;
+    /// `dsh://x/y?z` → `<origin>/x/y?z`；返回 `None` 表示本次无需导航。
+    fn navigate_deep_link(&mut self) -> Option<String> {
+        let origin = self.origin.clone()?;
+        let raw = self.open_url.take()?;
+        let rest = raw
+            .strip_prefix("dsh://")
+            .unwrap_or(&raw)
+            .trim_start_matches('/');
+        if rest.is_empty() {
+            return None;
         }
-        let rest = raw.strip_prefix("dsh://").unwrap_or(raw);
-        let target = format!("{origin}/{}", rest.trim_start_matches('/'));
-        self.open_url = None;
-        if let Err(err) = self.webview.load_url(&target) {
-            eprintln!("dsh-desktop: 深链导航失败：{err}");
-        }
+        Some(format!("{origin}/{rest}"))
     }
 
     fn set_zoom(&mut self, zoom: f64) {

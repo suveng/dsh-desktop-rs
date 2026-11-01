@@ -146,6 +146,19 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **验收**：`--selftest --simulate-drop <文件>` 输出 `{"tray":true,"hotkeys":true,"notify":true}` 与 `{"hostPath":"/tmp/…"}`；见 `docs/m2-acceptance.md` §4.2。
 
+### D9 干净容器验收降级为「本机安装后卸载」
+
+**决定**：M3 的「干净容器里 `dpkg -i`」改为「在本机真实 `dpkg -i` → 从 `/usr/bin` 运行验收 → `dpkg -r` 复原」。
+
+**理由**：本机没有 `docker`/`podman`，且安装容器运行时会改写宿主机系统（systemd 单元、存储驱动、iptables），代价与风险都超出本次交付范围。替代方案保留了「真实 dpkg 数据库 + 真实依赖解析 + 真实二进制执行」这三件事，唯一缺的是隔离。
+
+**被否决的方案**：
+- 装 docker/podman 只为一跑一次（会改宿主系统状态）。
+- `debootstrap` + chroot（需要在新 rootfs 里装整套 webkit 依赖，几百 MB，且没有窗口管理器仍然验证不了「从菜单启动」）。
+- 干脆不验证（等于把不可安装的包当交付物）。
+
+**残留口径**：criterion 4 的「从应用菜单启动并完成一次对话」在本机会话无法脚本化（无窗口管理器），验收证据退化为 `desktop-file-validate` + `xdg-mime query default x-scheme-handler/dsh` + 该二进制 `--selftest` 全绿。CI 里补容器化作业后可消除本条。
+
 ## 4. 架构
 
 ```

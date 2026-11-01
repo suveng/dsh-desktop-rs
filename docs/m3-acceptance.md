@@ -36,9 +36,9 @@
 
 **这些都不是「看起来对」**：deb 是真 `dpkg -i` 装进系统、真从 `/usr/bin` 跑的；验证完已经 `dpkg -r` 卸掉，机器状态与开始时一致。
 
-## 3. 与目标的偏差（已按约束补 ADR）
+## 3. 与目标的偏差（见 `architecture.md` ADR-D9）
 
-- **没做「干净容器」**：本机没有容器运行时（`docker`/`podman` 都不存在）。替代做法是**真实安装到当前系统后再卸载**，OS 与依赖都是真的，只是不隔离。要复现容器版，用：
+- **没做「干净容器」**：本机没有容器运行时（`docker`/`podman` 都不存在）。替代做法是**真实安装到当前系统后再卸载**，OS 与依赖都是真的，只是不隔离。这条偏离已按硬规则写成 **ADR-D9**。要复现容器版，用：
   ```bash
   docker run --rm -v $PWD/dist:/w ubuntu:24.04 bash -c \
     'apt-get update && apt-get install -y /w/dsh-desktop_0.1.0_amd64.deb && dsh-desktop --version'

@@ -8,13 +8,13 @@
 | 验收项 | 结果 | 证据 |
 |---|---|---|
 | 第二次启动只聚焦已有窗口 | ✅ | 第二次进程打印「已有实例在运行，请求已转发」、`exit=0`；宿主进程数不变（4）、窗口数不变（2 = toplevel+frame） |
-| 深链唤起并导航 | ✅ | `dsh-desktop dsh://session/abc` → 转发给主实例 → `architecture.md` §7-15 的映射规则导航到 `<origin>/session/abc` |
+| 深链唤起并导航 | ⚠️ 部分 | 转发路径正常；**冷启动带深链**的覆盖 bug 已修（Ready 时直接用深链目标加载，不再被根 URL 覆盖）。但上游没有 `/session/abc` 路由时仍是空页，回退到根页面的逻辑未实现 |
 | 原生菜单 | ✅ | `docs/spike/m2-menu.png`：文件 / 编辑 / 视图 / 窗口 / 帮助 |
 | 快捷键来自表 | ✅ | `crates/bin/src/menu.rs` 的 `bindings()` 是唯一真相：菜单项由它生成、加速键由它注册、「关于」里的帮助文本也由它渲染（`shortcuts_help()`） |
 | shim 生效 | ✅ | selftest：`marker=1`、`protocolVersion=1`、`directoryPicker=true`、`hostPaths=true`、`deviceInfoType=function` |
 | deviceInfo 真实往返 | ✅ | 返回 `dsh-desktop 0.1.0 · Ubuntu 24.04.5 LTS · x86_64 · ubuntu:GNOME`（请求与回填两侧都有日志） |
 | 前端插件不被 shim 打挂 | ✅ | `pluginError=false` —— 见 §3 的 bug |
-| `kill -9` 宿主 2 秒内恢复 | ✅ **975 ms** | 用编译产物启动宿主（`apps/cli/lib/bin.js`，冷启动 785ms），第一次崩溃立即重启；`pnpm dsh` 路径是 1885ms 冷启动，测出来 3.1s，所以默认优先用编译产物 |
+| `kill -9` 宿主 2 秒内恢复 | ⚠️ **通常 0.9–1.3s，偶发超限** | 常规路径：874/880/883/969/975/993/1014/1246 ms；另有 1943 ms 与一次 7253 ms（见 §4.4）。第一次崩溃不退避，且优先用 `apps/cli/lib/bin.js`（785ms 冷启动）。**不宣称必然 <2s** |
 | 连续崩溃 2 次后进失败页 | ✅ | 连续 kill 3 次后标题变为 `DeepSeek Harness — 启动失败` |
 | 冒烟测试可自动化 | ✅ | `xvfb-run -a bash scripts/smoke.sh` → `SMOKE OK`，失败页与基线 **0 像素差异** |
 
