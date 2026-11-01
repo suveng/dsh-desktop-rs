@@ -107,10 +107,12 @@ jobs:
           candle.exe -out target\wix\product.wixobj target\wix\product.wxs
           light.exe -out "dist\dsh-desktop-$version-windows-x64.msi" target\wix\product.wixobj
 
-          Copy-Item target\release\dsh-desktop.exe dist\
-          Copy-Item LICENSE, README.md dist\
-          Compress-Archive -Path "dist\dsh-desktop.exe",dist\LICENSE,dist\README.md `
-            -DestinationPath "dist\dsh-desktop-$version-windows-x64.zip" -Force
+          # 只把真正的发行文件放进 dist，避免把 LICENSE/README/wixpdb 也传成发布附件
+          $stage = "target\winzip"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item target\release\dsh-desktop.exe $stage\
+          Copy-Item LICENSE, README.md $stage\
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\dsh-desktop-$version-windows-x64.zip" -Force
           Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
