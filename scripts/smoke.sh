@@ -39,8 +39,9 @@ scenario_failure_page() {
   local pid=$!
 
   local win
-  win=$(wait_window '启动失败') || {
+  win=$(wait_window 'startup failed') || {
     kill -TERM "$pid" 2>/dev/null || true
+    echo "--- app 日志 ---"; sed -n '1,20p' "$OUT/failure.log" 2>/dev/null
     fail "没有出现失败页窗口"
   }
   sleep 1
