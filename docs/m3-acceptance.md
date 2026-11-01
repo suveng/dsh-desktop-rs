@@ -7,9 +7,13 @@
 
 | 产物 | 大小 | 校验 |
 |---|---|---|
-| `dist/dsh-desktop_0.1.0_amd64.deb` | 665 KB | 同名 `.sha256` |
-| `dist/dsh-desktop-0.1.0-x86_64.AppImage` | 1.7 MB | 同名 `.sha256` |
-| `dist/dsh-desktop-0.1.0-x86_64.tar.gz` | 809 KB | 同名 `.sha256` |
+| `dist/dsh-desktop_0.1.0_amd64.deb` | 1392 KB | 同名 `.sha256` |
+| `dist/dsh-desktop-0.1.0-x86_64.AppImage` | 2.4 MB | 同名 `.sha256` |
+| `dist/dsh-desktop-0.1.0-x86_64.tar.gz` | 1791 KB | 同名 `.sha256` |
+
+> **2026-11-01 12:30 重新打包**：首版产物（11:56）早于 D7 / 桌面集成 / 宿主解析三项修复，
+> 属于过期构建。现已重跑 `scripts/package.sh`，并在**新包**上重做了下面的安装验收；
+> 抽取 `/usr/bin/dsh-desktop` 后 `grep -ac` 确认包含 `托盘已启用`、`不在支持区间`、`apps/cli/lib/bin.js`。
 
 `scripts/package.sh` 一条命令出全部三件（`SKIP_APPIMAGE=1` 可跳过 AppImage）。
 
@@ -19,7 +23,7 @@
 |---|---|---|
 | deb 结构正确 | ✅ | `dpkg-deb -c`：`/usr/bin/dsh-desktop`、`.desktop`、`hicolor/{128,256,512}` 图标、MIME xml 齐全 |
 | deb 依赖声明 | ✅ | `Depends: libwebkit2gtk-4.1-0, libgtk-3-0` |
-| **真实 `dpkg -i`** | ✅ | 安装成功，触发器正常执行（gnome-menus / desktop-file-utils / hicolor / shared-mime-info） |
+| **真实 `dpkg -i`** | ✅ | 在新包上重装成功（`正在解压` → `正在设置`），触发器正常执行；验收后 `dpkg -r` 复原 |
 | `.desktop` 合法 | ✅ | `desktop-file-validate` 无输出（= 通过） |
 | MIME 关联生效 | ✅ | `xdg-mime query default x-scheme-handler/dsh` → `dsh-desktop.desktop` |
 | 安装后的二进制可跑 | ✅ | `/usr/bin/dsh-desktop --version` → `0.1.0`；`--selftest` 全绿（shim + deviceInfo） |
@@ -40,7 +44,7 @@
     'apt-get update && apt-get install -y /w/dsh-desktop_0.1.0_amd64.deb && dsh-desktop --version'
   ```
   这一条留作 M4 的 CI 项。
-- **托盘 / 系统通知 / 全局热键未做**：理由与被否决方案写在 `architecture.md` 的 **ADR-D8**。本机会话没有窗口管理器、也没有 `StatusNotifierWatcher`，无法验证的东西不先写进去。
+- **托盘 / 系统通知 / 全局热键 / 拖拽真实路径**：**已实现**（复审后按用户要求补齐），细节见 `docs/m2-acceptance.md` §4.2 与 `architecture.md` 的 **ADR-D8**。早期版本以「本机没有 StatusNotifierWatcher」为由推迟，该判断本身是错的 —— `gdbus` 实测返回 true。
 - **更新提示**：已实现并在 M2 复审里补上（`--check-update` 三条路径：无源→idle、有新版→available、同版本→up-to-date）。
 - **「从应用菜单启动并完成一次对话」**：菜单项与 MIME 关联都用 `desktop-file-validate` / `xdg-mime` 校验过；「点菜单 → 发消息」这一步需要图形会话里的人手操作，本机无 WM 无法脚本化，等价证据是 `--selftest`（真实前端 + 真实宿主 + 真实 IPC 往返）与 M0 的对话闭环。
 

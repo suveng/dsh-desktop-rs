@@ -81,6 +81,28 @@ dsh://x/y?z  →  <origin>/x/y?z
 
 降级策略写在 `architecture.md` 的 ADR-D8：探测不过就不创建，并在日志里说明原因 —— 不做「创建成功但看不见」的托盘。
 
+## 4.3 R4 收口：token 不再落盘（复审后修）
+
+审计用 `grep -rao "http://127.0.0.1:.*?token=…" ~/.cache ~/.local/share` 找到了 **20 条明文 token** ——
+来自 WebKit 的磁盘缓存（子资源的 Referer 就是带 token 的首页 URL）。日志脱敏、`Debug` 脱敏、
+`--probe` 只打 origin 都做到了，唯独「落盘」这条被浏览器缓存击穿。
+
+修复分三层：
+
+1. **搬到 tmpfs**：启动时把 `XDG_CACHE_HOME` / `XDG_DATA_HOME` 指向 `$XDG_RUNTIME_DIR/dsh-desktop-rs/webview`（0700，内存盘，注销即清）。
+2. **进出各清一次**：启动时删除历史遗留的 `~/.cache/dsh-desktop` 与 `~/.local/share/dsh-desktop`，退出时 `remove_dir_all(webview_home())`。
+3. **首屏后抹掉地址栏里的 token**：`history.replaceState(null, '', '/')`，后续子资源的 Referer 不再带 token。
+
+验证：跑两轮实例并退出后，`~/.cache/dsh-desktop` 不存在、tmpfs 中 `token=` 计数为 **0**、残留宿主 0。
+
+## 4.4 恢复时延分布（不写单值）
+
+跨多次实测（含审计独立跑的 9 次与本机 3 次）：**874 / 880 / 883 / 969 / 975 / 993 / 1014 / 1246 ms**，
+另有一次 **1943 ms** 与一次 **7253 ms** —— 后者发生在一个刚被深链导航过的实例上，原因未定位。
+
+结论：**常规路径稳定在 1 秒左右**，满足 2 秒门槛；但存在偶发超限，暂不宣称「必然 < 2s」。
+后续要做的是把重启也纳入结构化日志（记录 kill→Exited→ready 各段耗时），再判断 7.2s 是重复重启排队还是宿主冷启动抖动。
+
 ## 5. 已知未覆盖
 
 - 真实窗口管理器下的菜单/焦点行为（本机 X11 会话无 WM）。

@@ -400,8 +400,55 @@ fn run_window(cli: Cli) -> i32 {
     run_window_inner(cli, Some(instance))
 }
 
+fn webview_home() -> std::path::PathBuf {
+    dsh_platform::runtime_dir().join("webview")
+}
+
+/// R4：带 token 的 URL 不能**落盘**。
+///
+/// WebKit 会把子资源连同带 `?token=` 的 Referer 写进磁盘缓存，日志脱敏救不了它。
+/// 做法是把 XDG 缓存/数据目录指到 `$XDG_RUNTIME_DIR`（tmpfs），并在启动与退出时各清一次。
+fn isolate_webview_storage() -> std::path::PathBuf {
+    let home = webview_home();
+    let _ = std::fs::create_dir_all(&home);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
+    }
+
+    // 上一版把缓存写在了持久目录里；这里把它们清掉（只删我们自己应用名下的目录）。
+    if let Some(base) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for legacy in [
+            base.join(".cache/dsh-desktop"),
+            base.join(".local/share/dsh-desktop"),
+        ] {
+            if legacy.exists() {
+                let _ = std::fs::remove_dir_all(&legacy);
+                eprintln!("dsh-desktop: 已清理历史 WebKit 缓存 {}", legacy.display());
+            }
+        }
+    }
+
+    let _ = std::fs::create_dir_all(home.join("cache"));
+    let _ = std::fs::create_dir_all(home.join("data"));
+    // SAFETY: 这段跑在创建 webview 之前的主线程上，之后没有别的线程读这两个变量。
+    unsafe {
+        std::env::set_var("XDG_CACHE_HOME", home.join("cache"));
+        std::env::set_var("XDG_DATA_HOME", home.join("data"));
+    }
+    home
+}
+
+fn wipe_webview_storage() {
+    let _ = std::fs::remove_dir_all(webview_home());
+}
+
 fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let spec = launch_spec(&cli);
+
+    // R4：先把 webview 的落盘目录搬到 tmpfs，再谈加载。
+    isolate_webview_storage();
 
     // D7：探测 + 报警，不硬拦。
     let version_note = probe_host_version(&cli).as_deref().and_then(version_note);
@@ -655,6 +702,7 @@ impl App {
                     self.ready_since = Some(Instant::now());
                     self.navigate_deep_link();
                     self.start_update_check();
+                    self.strip_token_from_location();
                     window.set_title(&self.title_for(APP_TITLE));
                     if let Err(err) = self.webview.load_url(url.as_str()) {
                         self.fail(
@@ -732,6 +780,13 @@ impl App {
                 other => eprintln!("dsh-desktop: 未知的界面指令 {other:?}"),
             }
         }
+    }
+
+    /// 首屏加载后把 `?token=` 从地址里去掉（WebKit 的 Referer 也就干净了）。
+    fn strip_token_from_location(&mut self) {
+        self.webview
+            .evaluate_script("history.replaceState(null, '', '/');")
+            .ok();
     }
 
     fn start_update_check(&mut self) {
@@ -1094,6 +1149,7 @@ impl App {
                     self.open_url = Some(url);
                     self.navigate_deep_link();
                     self.start_update_check();
+                    self.strip_token_from_location();
                 }
             }
         }
@@ -1188,6 +1244,7 @@ impl App {
         if let Some(instance) = self.instance.take() {
             instance.release();
         }
+        wipe_webview_storage();
     }
 }
 
