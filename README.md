@@ -118,6 +118,12 @@ scripts/package.sh                        # 出 tar.gz / deb / AppImage 到 dist
 - **深链目标无路由时是空页**：`dsh://x/y` → `<origin>/x/y`，上游没有该路由时不会回退到根页面（只做了空页探测的数据采集）。
 - **干净容器安装未验证**：本机无 docker/podman，降级为「本机 `dpkg -i` → 验收 → `dpkg -r`」，见 `docs/architecture.md` ADR-D9。
 
+## 相关
+
+- **上游**：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) —— 本项目只是它的桌面壳，UI、协议、插件生态全部归上游，不 fork、不 patch。
+- **同类思路**：[deepfounder-ai/desigma](https://github.com/deepfounder-ai/desigma) —— 同样用 Rust 做原生桌面端；本项目从它的工程纪律（crate 边界、快捷键表驱动、失败页文案）里借了不少，见 `docs/architecture.md` 附录。
+- 本项目在 GitHub 上的 topic：`dsh` / `deepseek-harness` / `desktop-shell`，便于和上游生态一起被检索到。
+
 ## 目录
 
 ```
