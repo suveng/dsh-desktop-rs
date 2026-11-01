@@ -1307,9 +1307,10 @@ impl App {
     }
 
     fn fail(&mut self, window: &tao::window::Window, summary: &str, detail: &str) {
-        desktop::notify(summary, detail);
         self.failure = Some((summary.to_owned(), detail.to_owned()));
-        window.set_title(&format!("{APP_TITLE} — 启动失败"));
+        // 标题用 ASCII，避免 CI 的 locale 影响 xdotool 匹配；中文留在页面里。
+        window.set_title(&format!("{APP_TITLE} — startup failed"));
+        desktop::notify(summary, detail);
         self.webview
             .load_html(&failure_page(summary, detail, &self.logs, &self.spec))
             .ok();
