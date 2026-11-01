@@ -113,6 +113,8 @@ struct Cli {
     simulate_drop: Vec<String>,
     /// 更新源（JSON：`{"version","url"}`）。缺省时不做任何网络请求。
     update_feed: Option<String>,
+    /// 有窗口：在壳内发一条消息（M1「能正常对话」）。
+    selftest_chat: bool,
     /// 无窗口：只查一次更新并打印 JSON。
     check_update: bool,
     version: bool,
@@ -133,6 +135,7 @@ impl Cli {
   --simulate-drop <path>  自检用：假装拖入一个路径（可重复），验证真实路径回填
   --update-feed <url>     更新源（JSON：{version,url}）；默认读 DSH_DESKTOP_UPDATE_FEED
   --check-update          无窗口：查一次更新并打印 JSON
+  --selftest-chat         有窗口：在壳内发一条消息（配合会话库核对）
   -V, --version           打印版本
   -h, --help              打印本帮助
 
@@ -152,6 +155,7 @@ impl Cli {
             update_feed: std::env::var("DSH_DESKTOP_UPDATE_FEED")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            selftest_chat: false,
             check_update: false,
             version: false,
             help: false,
@@ -179,6 +183,7 @@ impl Cli {
                 "--selftest" => cli.selftest = true,
                 "--simulate-drop" => cli.simulate_drop.push(value(&mut it, "--simulate-drop")?),
                 "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
+                "--selftest-chat" => cli.selftest_chat = true,
                 "--check-update" => cli.check_update = true,
                 "-V" | "--version" => cli.version = true,
                 "-h" | "--help" => cli.help = true,
@@ -537,6 +542,7 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         restart_at: None,
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
+        selftest_chat: cli.selftest_chat,
         restart_started: None,
         deep_link_ticks: 0,
         simulate_drop: cli.simulate_drop.clone(),
@@ -549,6 +555,7 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         update_feed: cli.update_feed.clone(),
         selftest: cli.selftest.then(Selftest::default),
         tick_count: 0,
+        ready_tick: 0,
         logs: VecDeque::with_capacity(LOG_TAIL),
         ready: false,
         failure: None,
@@ -613,6 +620,8 @@ struct App {
     pending_js: Arc<Mutex<Vec<String>>>,
     /// 重启分段计时的起点（宿主退出被检测到的时刻）。
     restart_started: Option<Instant>,
+    /// `--selftest-chat`：在壳内真的发一条消息（验证输入通路 + 流式渲染）。
+    selftest_chat: bool,
     /// 深链落地后等待页面稳定的计数。
     deep_link_ticks: u32,
     /// 自检用：假装拖入的路径。
@@ -631,6 +640,7 @@ struct App {
     selftest: Option<Selftest>,
     /// 自检看的是「加载完成之后又跑了几帧」，用帧数比用时钟更稳。
     tick_count: u32,
+    ready_tick: u32,
     logs: VecDeque<String>,
     ready: bool,
     failure: Option<(String, String)>,
@@ -681,6 +691,7 @@ impl App {
         self.drain_commands(window);
         self.drain_desktop(window);
         self.settle_deep_link();
+        self.drive_chat_selftest();
 
         if let Some(at) = self.restart_at
             && Instant::now() >= at
@@ -711,6 +722,7 @@ impl App {
                         );
                     }
                     self.ready = true;
+                    self.ready_tick = self.tick_count;
                     self.origin = Some(url.origin().to_owned());
                     self.ready_since = Some(Instant::now());
                     let target = self.navigate_deep_link();
@@ -985,6 +997,10 @@ impl App {
             if script.contains("__dshShimResolve(") {
                 eprintln!("dsh-desktop: shim 回填 {script}");
             }
+            if let Some(value) = script.strip_prefix("__DIAG__") {
+                eprintln!("dsh-desktop: [diag] {value}");
+                continue;
+            }
             if let Some(value) = script.strip_prefix("__SELFTEST__") {
                 if let Some(state) = self.selftest.as_mut() {
                     state.results.push(value.to_owned());
@@ -1062,7 +1078,7 @@ impl App {
         self.webview
             .evaluate_script_with_callback(script, move |value| {
                 if let Ok(mut queue) = pending.lock() {
-                    queue.push(format!("__SELFTEST__{value}"));
+                    queue.push(format!("__DIAG__{value}"));
                 }
             })
             .ok();
@@ -1127,6 +1143,48 @@ impl App {
             self.deep_link_ticks = 0;
             self.probe_script(
                 "JSON.stringify({ deepLinkBody: (document.body.innerText || '').trim().length })",
+            );
+        }
+    }
+
+    /// 关键点：先把 webview 自己 focus 上，再走 execCommand ——
+    /// 之前只 focus 了 DOM 节点，GTK 层没有焦点，输入命令全部被丢弃。
+    /// A 层：只验证「输入能进 composer」。渲染层由 B（网络路径）单独覆盖。
+    /// 页面是渐进渲染的，所以注入自轮询脚本，等 composer 出现再输入。
+    fn drive_chat_selftest(&mut self) {
+        if !self.selftest_chat || self.ready_tick == 0 {
+            return;
+        }
+        let since = self.tick_count.saturating_sub(self.ready_tick);
+        if since == 10 {
+            self.webview.focus().ok();
+            self.webview
+                .evaluate_script(
+                    r#"
+                    (function () {
+                      var started = Date.now();
+                      var iv = setInterval(function () {
+                        var ce = document.querySelector('[contenteditable="true"]');
+                        if (ce && !window.__dshTyped) {
+                          ce.focus();
+                          window.__dshExec = document.execCommand('insertText', false, 'CHATOK');
+                          window.__dshTyped = true;
+                          var b = Array.prototype.slice.call(document.querySelectorAll('button')).filter(function (x) {
+                            return /发送消息/i.test((x.getAttribute('aria-label') || x.innerText || '').trim());
+                          })[0];
+                          if (b) { b.click(); window.__dshClicked = true; }
+                          clearInterval(iv);
+                        }
+                        if (Date.now() - started > 20000) { clearInterval(iv); }
+                      }, 300);
+                    })();
+                    "#,
+                )
+                .ok();
+        }
+        if since == 40 || since == 70 {
+            self.probe_script(
+                "JSON.stringify({ stage: 'chat', typed: !!window.__dshTyped, clicked: !!window.__dshClicked, ws: (window.__dshWs||{}), echo: (document.body.innerText||'').indexOf('CHATOK') >= 0, bodyLen: (document.body.innerText||'').length })",
             );
         }
     }

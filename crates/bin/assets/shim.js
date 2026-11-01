@@ -8,6 +8,28 @@
  * `window.__dshShimResolve(id, ok, value)` 回填。
  */
 (function () {
+  // B 层证据：壳内的 WebSocket 是否真的收到流式帧。
+  window.__dshWs = { opens: 0, msgs: 0, types: {} };
+  (function () {
+    var WS = window.WebSocket;
+    function Hooked(url, protocols) {
+      var ws = protocols === undefined ? new WS(url) : new WS(url, protocols);
+      window.__dshWs.opens += 1;
+      ws.addEventListener('message', function (e) {
+        window.__dshWs.msgs += 1;
+        try {
+          var t = (JSON.parse(e.data) || {}).type || 'unknown';
+          window.__dshWs.types[t] = (window.__dshWs.types[t] || 0) + 1;
+        } catch (_) {}
+      });
+      return ws;
+    }
+    Hooked.prototype = WS.prototype;
+    Hooked.CONNECTING = WS.CONNECTING; Hooked.OPEN = WS.OPEN;
+    Hooked.CLOSING = WS.CLOSING; Hooked.CLOSED = WS.CLOSED;
+    window.WebSocket = Hooked;
+  })();
+
   const pending = new Map();
   let seq = 0;
 

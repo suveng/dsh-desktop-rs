@@ -9,7 +9,7 @@
 |---|---|---|
 | 3 秒内出现界面 | ✅ **2059 ms / 2067 ms** | 从进程启动到窗口标题变为 `DeepSeek Harness`（= 收到就绪 URL）；两次独立运行 |
 | 界面是真的（不是骨架页） | ✅ | `docs/spike/m1-window.png`：侧栏/工作区/编辑器/模型选择器全部渲染 |
-| 能正常对话 | ⚠️ 弱证据 | 只有 M0 的同一运行时探针（148 个流式帧）。尝试在壳内合成输入并发送，两次都没生效；根因是本会话**没有窗口管理器**，窗口拿不到输入焦点，`execCommand`/合成按键不生效（M0 能成功是因为脚本自己创建窗口并 `grab_focus`）。已在会话数据里确认**没有**这条消息落库。未作为验收依据，见 README「已知限制」 |
+| 能正常对话 | ✅ **壳内实测** | `--selftest-chat` + `xvfb + openbox`：`typed=true, execOK=true, textLen=7` → 点发送 → **WS 收到 13 个 `item` 流式帧**，`echo=true`（回复文本在 DOM 里）。见 §4 |
 | 关闭后进程完全退出 | ✅ `exit=0` | SIGTERM → 优雅关闭；之后 `pgrep -f '[p]rofile web'` = 0，端口释放 |
 | 无残留宿主 | ✅ | 同上；`Drop` + 信号处理器双保险 |
 | 失败页面 | ✅ | `docs/spike/m1-failure-page.png`：一句话结论 + 可复制诊断 + 三个按钮 |
@@ -52,6 +52,24 @@ supervisor 对外是**同步** API（`poll()` / `recv_timeout()` / `stop()`）�
 ## 4. 与 `architecture.md` 的偏差
 
 无。M1 的产出与 §4 的 crate 边界、§5 的生命周期状态机、§8.3 的失败页结构一致。第 3 节的两条属于实现细节，不构成决策变更，因此不新增 ADR。
+
+## 4. 壳内对话：把一件事拆成两层测
+
+前三次尝试都失败，加了仪表才发现**根因不是焦点，是时机**：
+
+```
+ready 后第 3 秒:  bodyLen=24, composer 不存在     ← 页面还在渐进渲染
+ready 后第 6 秒:  按钮里才出现「发送消息」
+```
+
+所以改成 **A + B 两层**：
+
+- **A（输入层）**：注入自轮询脚本，等 composer 出现再 `focus()` + `execCommand`，只断言「文本进了编辑器」。结果 `typed=true, execOK=true, textLen=7`。
+- **B（渲染层）**：A 成功后点「发送消息」，用 shim 里 hook 的 `window.__dshWs` 统计 WebSocket 帧，并检查 DOM 里是否出现回复。结果 `ws={opens:1, msgs:13, types:{item:13}}, echo=true`。
+
+两层的失败原因完全不同，绑在一条用例里就会像前三次那样「发不出去但不知道卡在哪」。
+
+**环境要求**：A 层需要窗口管理器（`xvfb + openbox`），否则窗口拿不到输入焦点。这是 `architecture.md §10` 原先漏掉的一条，已补进 ADR-D10。
 
 ## 5. 已知未覆盖
 

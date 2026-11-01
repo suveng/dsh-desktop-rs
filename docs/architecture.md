@@ -161,6 +161,14 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **残留口径**：criterion 4 的「从应用菜单启动并完成一次对话」在本机会话无法脚本化（无窗口管理器），验收证据退化为 `desktop-file-validate` + `xdg-mime query default x-scheme-handler/dsh` + 该二进制 `--selftest` 全绿。CI 里补容器化作业后可消除本条。
 
+### D10 验收必须分层，输入类用例必须声明依赖窗口管理器
+
+**决定**：验收用例按「壳的能力」与「WebKit 的能力」分层；涉及输入焦点的用例必须在 `xvfb + openbox` 下运行，并在文档里标注这一依赖。
+
+**理由**：M1 的「能正常对话」一度被判为不可验证，真相是两件事被混在一起——①输入能否进 composer（依赖 WM 焦点）②流式能否渲染（不依赖）。无 WM 时①必然失败，但这不代表壳有问题。拆开后两者都有确定的结论：A 层 `execOK=true, textLen=7`，B 层 `ws.msgs=13, echo=true`。另外页面是渐进渲染的，固定时刻操作 composer 会拿到 `ce=false`，必须轮询等待。
+
+**被否决的方案**：把「发一条消息」当成一条原子用例（失败时无法定位是焦点、选择器还是按钮匹配，前三次就是这样浪费掉的）。
+
 ## 4. 架构
 
 ```
