@@ -113,14 +113,14 @@ jobs:
               <Directory Id="TARGETDIR" Name="SourceDir">
                 <Directory Id="ProgramFiles64Folder">
                   <Directory Id="INSTALLFOLDER" Name="DeepSeek Harness">
-                    <Component Id="MainExecutable" Guid="*">
+                    <Component Id="MainExecutable" Guid="3F7A2C41-8B2E-4D2A-9C3B-11A2B3C4D5E6">
                       <File Id="DshDesktopExe" Source="target\wix\dsh-desktop.exe" KeyPath="yes">
                         <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuDir"
                                   Name="DeepSeek Harness" WorkingDirectory="INSTALLFOLDER"
-                                  Icon="AppIcon" Advertise="yes"/>
+                                  Icon="AppIcon"/>
                         <Shortcut Id="DesktopShortcut" Directory="DesktopFolder"
                                   Name="DeepSeek Harness" WorkingDirectory="INSTALLFOLDER"
-                                  Icon="AppIcon" Advertise="yes"/>
+                                  Icon="AppIcon"/>
                       </File>
                       <File Id="LicenseFile" Source="target\wix\LICENSE"/>
                     </Component>
