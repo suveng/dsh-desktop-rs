@@ -1,0 +1,62 @@
+name: release-reminder
+
+# 每次 push 到 main 检查：Cargo.toml 的版本是否已经有对应的 vX.Y.Z tag。
+# 没打 tag 不会让流水线失败，但会在 Actions 里报警告、写 job summary，
+# 并开一个（同一版本只开一次的）issue 提醒发布。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 检查版本是否已打 tag
+        id: check
+        run: |
+          set +e
+          output=$(bash scripts/check-release-tag.sh 2>&1)
+          status=$?
+          echo "${output}" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "status=${status}"
+            echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 在 Actions 里报警告
+        if: steps.check.outputs.status != '0'
+        run: |
+          echo "::warning title=版本未发布::Cargo.toml 的 v${{ steps.check.outputs.version }} 还没有 tag，确认发布时请打 tag"
+
+      - name: 开提醒 issue（同一版本只开一次）
+        if: steps.check.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.check.outputs.version }}"
+          title="发布 v${version}：Cargo.toml 已到 ${version}，tag 还没打"
+          existing=$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            echo "已有提醒 issue #${existing}"
+            exit 0
+          fi
+          {
+            echo "Cargo.toml 当前是 ${version}，远端还没有 v${version} tag。"
+            echo
+            echo "按 CONTRIBUTING.md「版本与发布」：确认发布后执行，release.yml 会自动出三平台产物。"
+            echo
+            echo '    git tag -a v${version} -m "dsh-desktop ${version}"'
+            echo '    git push origin v${version}'
+            echo
+            echo "打完 tag 后请关闭本 issue。"
+          } > /tmp/release-reminder.md
+          gh issue create --title "${title}" --body-file /tmp/release-reminder.md

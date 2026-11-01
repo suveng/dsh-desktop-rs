@@ -30,3 +30,28 @@ xvfb-run -a -s "-screen 0 1600x1000x24" bash scripts/smoke.sh
 ## 提交信息
 
 Conventional Commits：`feat:` / `fix:` / `docs:` / `chore:` / `refactor:`。
+
+## 版本与发布
+
+版本号只有一处：根 `Cargo.toml` 的 `[workspace.package].version`。配套 tag 必须与它一致。
+
+**规则：改版本就是发布的一部分——确认要发的那次改动里，tag 必须一起打上，不允许「先改版本、之后想起来再发」。**
+
+确认发布时按顺序执行：
+
+```bash
+bash scripts/check-release-tag.sh          # 先确认是否已经漏了
+git tag -a vX.Y.Z -m "dsh-desktop X.Y.Z"   # tag 与 Cargo.toml 版本必须相同
+git push origin vX.Y.Z
+```
+
+- `release.yml` 只由 `v*` tag 触发：先 `verify`（fmt / clippy / test / build / smoke），再并行出 Linux（deb / AppImage / tar.gz）、macOS、Windows 产物，最后建 Release。手动 dispatch **只构建、不发布**。
+- `.github/workflows/release-reminder.yml` 每次 push 到 main 都会跑 `scripts/check-release-tag.sh`：版本没有 tag 时在 Actions 里报警告、写 job summary，并开一个「同一版本只开一次」的 issue 提醒。它不会让流水线变红——发不发由人决定。
+- tag 打错了（打在了改版本之前，或指向的提交版本不对）：删掉重打
+
+  ```bash
+  git tag -d vX.Y.Z
+  git push origin :refs/tags/vX.Y.Z
+  ```
+
+- tag 是发布开关：删本地 tag 不会撤回已发布的 Release；撤回 Release 需要 `gh release delete`（按根目录 AGENTS.md，这属于对外可见操作，先确认）。
