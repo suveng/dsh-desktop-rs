@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,6 +21,9 @@ pub const READY_PREFIX: &str = "dsh web: ";
 
 /// `startup.ts` 侧没有超时，这个值只是壳的耐心。
 pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 退出后最多等这么久，让 stdio 读取线程把最后几行交出来。
+const PUMP_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// 优雅关闭窗口：先 SIGTERM 整个进程组，超时再 SIGKILL。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
@@ -216,6 +219,9 @@ pub struct Host {
     events: Receiver<Event>,
     ready: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
+    /// 还活着的 stdio 读取线程数。退出时要等它们把最后几行吐干净。
+    /// 还活着的 stdio 读取线程数。退出时要等它们把最后几行吐干净。
+    pumps: Arc<AtomicUsize>,
     spec: LaunchSpec,
     stop_done: bool,
 }
@@ -256,14 +262,29 @@ impl Host {
         let (tx, rx) = channel::<Event>();
         let ready = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
+        let pumps = Arc::new(AtomicUsize::new(0));
 
         let _ = tx.send(Event::Starting { pid });
 
         if let Some(out) = child.stdout.take() {
-            pump(out, Stream::Stdout, tx.clone(), Arc::clone(&ready));
+            pumps.fetch_add(1, Ordering::Relaxed);
+            pump(
+                out,
+                Stream::Stdout,
+                tx.clone(),
+                Arc::clone(&ready),
+                Arc::clone(&pumps),
+            );
         }
         if let Some(err) = child.stderr.take() {
-            pump(err, Stream::Stderr, tx.clone(), Arc::clone(&ready));
+            pumps.fetch_add(1, Ordering::Relaxed);
+            pump(
+                err,
+                Stream::Stderr,
+                tx.clone(),
+                Arc::clone(&ready),
+                Arc::clone(&pumps),
+            );
         }
 
         spawn_ready_watchdog(
@@ -279,6 +300,7 @@ impl Host {
             events: rx,
             ready,
             exited,
+            pumps,
             spec,
             stop_done: false,
         })
@@ -311,6 +333,17 @@ impl Host {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
                     self.exited.store(true, Ordering::Relaxed);
+                    // 否则「崩溃原因」那行 stderr 会赶在 Exited 之后到达，被调用方丢掉。
+                    let deadline = Instant::now() + PUMP_DRAIN_TIMEOUT;
+                    while Instant::now() < deadline && self.pumps.load(Ordering::Relaxed) > 0 {
+                        while let Ok(ev) = self.events.try_recv() {
+                            out.push(ev);
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    while let Ok(ev) = self.events.try_recv() {
+                        out.push(ev);
+                    }
                     out.push(Event::Exited {
                         code: exit_code(&status),
                     });
@@ -370,8 +403,13 @@ fn exit_code(status: &ExitStatus) -> Option<i32> {
     status.code()
 }
 
-fn pump<R>(reader: R, stream: Stream, tx: Sender<Event>, ready: Arc<AtomicBool>)
-where
+fn pump<R>(
+    reader: R,
+    stream: Stream,
+    tx: Sender<Event>,
+    ready: Arc<AtomicBool>,
+    pumps: Arc<AtomicUsize>,
+) where
     R: std::io::Read + Send + 'static,
 {
     thread::spawn(move || {
@@ -394,6 +432,7 @@ where
                 line: redact(&line),
             });
         }
+        pumps.fetch_sub(1, Ordering::Relaxed);
     });
 }
 
