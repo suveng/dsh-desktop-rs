@@ -65,6 +65,15 @@ fn install_signal_handlers() {
 }
 
 fn main() {
+    // WebKitGTK 的 DMA-BUF 渲染器在部分驱动上会让 backdrop-filter 浮层的**内容**不绘制：
+    // 只看到模糊底、看不到菜单文字（dsh 的菜单表面用 backdrop-filter）。
+    // 壳默认关掉它；用户显式设置过就尊重用户。
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: 创建 webview 之前、单线程启动阶段设置。
+        unsafe {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
     let cli = match Cli::parse(std::env::args().skip(1)) {
         Ok(cli) => cli,
         Err(err) => {
@@ -117,6 +126,8 @@ struct Cli {
     update_feed: Option<String>,
     /// 有窗口：在壳内发一条消息（M1「能正常对话」）。
     selftest_chat: bool,
+    /// 有窗口：点开工作区「…」菜单并 dump 浮层内容（排查空白浮层）。
+    selftest_menu: bool,
     /// 无窗口：只查一次更新并打印 JSON。
     check_update: bool,
     version: bool,
@@ -158,6 +169,7 @@ impl Cli {
                 .ok()
                 .filter(|v| !v.is_empty()),
             selftest_chat: false,
+            selftest_menu: false,
             check_update: false,
             version: false,
             help: false,
@@ -186,6 +198,10 @@ impl Cli {
                 "--simulate-drop" => cli.simulate_drop.push(value(&mut it, "--simulate-drop")?),
                 "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
                 "--selftest-chat" => cli.selftest_chat = true,
+                "--selftest-menu" => {
+                    cli.selftest = true;
+                    cli.selftest_menu = true;
+                }
                 "--check-update" => cli.check_update = true,
                 "-V" | "--version" => cli.version = true,
                 "-h" | "--help" => cli.help = true,
@@ -552,6 +568,8 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
         selftest_chat: cli.selftest_chat,
+        selftest_menu: cli.selftest_menu,
+        menu_clicked: false,
         restart_started: None,
         deep_link_ticks: 0,
         simulate_drop: cli.simulate_drop.clone(),
@@ -631,6 +649,10 @@ struct App {
     restart_started: Option<Instant>,
     /// `--selftest-chat`：在壳内真的发一条消息（验证输入通路 + 流式渲染）。
     selftest_chat: bool,
+    /// `--selftest-menu`：点开工作区「…」菜单并 dump 浮层内容。
+    selftest_menu: bool,
+    /// 菜单自检只注入一次。
+    menu_clicked: bool,
     /// 深链落地后等待页面稳定的计数。
     deep_link_ticks: u32,
     /// 自检用：假装拖入的路径。
@@ -701,6 +723,7 @@ impl App {
         self.drain_desktop(window);
         self.settle_deep_link();
         self.drive_chat_selftest();
+        self.drive_menu_selftest();
 
         if let Some(at) = self.restart_at
             && Instant::now() >= at
@@ -736,7 +759,8 @@ impl App {
                     self.ready_since = Some(Instant::now());
                     let target = self.navigate_deep_link();
                     self.start_update_check();
-                    self.strip_token_from_location();
+                    // 先禁用 replaceState 试验：/1 研究空白浮层是否由它导致
+                    // self.strip_token_from_location();
                     window.set_title(&self.title_for(APP_TITLE));
                     if let Err(err) = self
                         .webview
@@ -964,6 +988,15 @@ impl App {
                 }
                 self.resolve(id, true, &serde_json::Value::Null);
             }
+            "probe-menu" => {
+                // 页面侧定时采集，Rust 侧只负责收 —— 不依赖壳的帧循环。
+                if let Some(data) = request.get("data")
+                    && let Some(state) = self.selftest.as_mut()
+                {
+                    state.results.push(data.to_string());
+                }
+                self.resolve(id, true, &serde_json::Value::Null);
+            }
             "pick-directory" => match pick_directory() {
                 Some(path) => self.resolve(id, true, &serde_json::Value::String(path)),
                 None => self.resolve(id, false, &serde_json::Value::String("已取消".to_owned())),
@@ -1101,7 +1134,9 @@ impl App {
         }
         let has_host_path = self.simulate_drop.is_empty()
             || state.results.iter().any(|row| row.contains("\"hostPath\""));
-        if !has_device || !has_host_path {
+        let menu_done =
+            !self.selftest_menu || state.results.iter().any(|row| row.contains("\"blur\""));
+        if !has_device || !has_host_path || !menu_done {
             return;
         }
         let output = state.results.join(" ");
@@ -1198,6 +1233,42 @@ impl App {
         }
     }
 
+    /// 点开工作区「…」菜单，再把浮层里的真实内容 dump 出来。
+    fn drive_menu_selftest(&mut self) {
+        if !self.selftest_menu || self.menu_clicked || self.ready_since.is_none() {
+            return;
+        }
+        self.menu_clicked = true;
+        // 采集放页面里做（setTimeout），壳只等 IPC 回来的结果。
+        self.webview
+            .evaluate_script(
+                r#"
+                (function () {
+                  setTimeout(function () {
+                    var b = Array.prototype.slice.call(document.querySelectorAll('button')).filter(function (x) {
+                      return /工作区.*的操作/.test((x.getAttribute('aria-label') || '').trim());
+                    })[0];
+                    window.__dshMenuBtn = !!b;
+                    if (b) b.click();
+                  }, 3000);
+                  setTimeout(function () {
+                    var menus = Array.prototype.slice.call(document.querySelectorAll('[role="menu"],[data-radix-popper-content-wrapper],[role="dialog"]'));
+                    var data = {
+                      btn: window.__dshMenuBtn === true,
+                      count: menus.length,
+                      text: menus.map(function (m) { return (m.innerText || '').trim().slice(0, 60); }),
+                      cls: menus.map(function (m) { return (m.className || '').toString().slice(0, 40); }),
+                      blur: menus.map(function (m) { return getComputedStyle(m).backdropFilter; }),
+                      rect: menus.map(function (m) { var r = m.getBoundingClientRect(); return Math.round(r.width) + 'x' + Math.round(r.height); })
+                    };
+                    window.ipc.postMessage(JSON.stringify({ kind: 'probe-menu', id: 900, data: data }));
+                  }, 7000);
+                })();
+                "#,
+            )
+            .ok();
+    }
+
     fn drain_menu(&mut self, window: &tao::window::Window) {
         for action in self.menubar.drain_events() {
             match action {
@@ -1257,7 +1328,8 @@ impl App {
                         let _ = self.navigate_deep_link();
                     }
                     self.start_update_check();
-                    self.strip_token_from_location();
+                    // 先禁用 replaceState 试验：/1 研究空白浮层是否由它导致
+                    // self.strip_token_from_location();
                 }
             }
         }

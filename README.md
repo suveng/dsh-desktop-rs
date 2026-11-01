@@ -90,6 +90,18 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 
 诊断信息在 `$XDG_STATE_HOME/dsh-desktop-rs/`，窗口几何在 `window.json`。
 
+## 已知问题：菜单/浮层只显示空白框（已修复）
+
+症状：点工作区「…」或会话「⋮」，弹出一个**有边框、有尺寸、但没有文字**的半透明框；鼠标移开再移回来、或切换一下窗口，内容才出现。
+
+原因不在 dsh 前端，而在 **WebKitGTK 的 DMA-BUF 渲染器**：dsh 的菜单表面带 `backdrop-filter`（`packages/client/ui-primitives/lib/MenuSurface.module.css:27`），这类元素会被提成独立合成层，而 DMA-BUF 路径在某些驱动/会话下**只画模糊底、不画该层的内容**，并且只在收到下一次重绘时才补上。
+
+壳的处理：启动时默认设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`（你自己显式设置过就不覆盖）。代价是合成路径变保守，几乎无可感知的性能损失；换来的是浮层稳定可见。若你的机器上仍然异常，再叠加：
+
+```bash
+WEBKIT_DISABLE_COMPOSITING_MODE=1 dsh-desktop
+```
+
 ## 从源码构建
 
 ```bash
