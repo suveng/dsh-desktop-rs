@@ -113,6 +113,8 @@ struct Cli {
     simulate_drop: Vec<String>,
     /// 更新源（JSON：`{"version","url"}`）。缺省时不做任何网络请求。
     update_feed: Option<String>,
+    /// 有窗口：在壳内发一条消息并等回复（M1「能正常对话」）。
+    selftest_chat: bool,
     /// 无窗口：只查一次更新并打印 JSON。
     check_update: bool,
     version: bool,
@@ -133,6 +135,7 @@ impl Cli {
   --simulate-drop <path>  自检用：假装拖入一个路径（可重复），验证真实路径回填
   --update-feed <url>     更新源（JSON：{version,url}）；默认读 DSH_DESKTOP_UPDATE_FEED
   --check-update          无窗口：查一次更新并打印 JSON
+  --selftest-chat         有窗口：在壳内发一条消息并等回复（含 --selftest 的全部检查）
   -V, --version           打印版本
   -h, --help              打印本帮助
 
@@ -152,6 +155,7 @@ impl Cli {
             update_feed: std::env::var("DSH_DESKTOP_UPDATE_FEED")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            selftest_chat: false,
             check_update: false,
             version: false,
             help: false,
@@ -179,6 +183,10 @@ impl Cli {
                 "--selftest" => cli.selftest = true,
                 "--simulate-drop" => cli.simulate_drop.push(value(&mut it, "--simulate-drop")?),
                 "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
+                "--selftest-chat" => {
+                    cli.selftest = true;
+                    cli.selftest_chat = true;
+                }
                 "--check-update" => cli.check_update = true,
                 "-V" | "--version" => cli.version = true,
                 "-h" | "--help" => cli.help = true,
@@ -537,6 +545,9 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         restart_at: None,
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
+        selftest_chat: cli.selftest_chat,
+        restart_started: None,
+        deep_link_ticks: 0,
         simulate_drop: cli.simulate_drop.clone(),
         tray: None,
         hotkeys: None,
@@ -609,6 +620,12 @@ struct App {
     open_url: Option<String>,
     /// host → 页面 的回填脚本，在 tick 里统一 evaluate。
     pending_js: Arc<Mutex<Vec<String>>>,
+    /// `--selftest-chat`：在壳内发一条消息并等回复。
+    selftest_chat: bool,
+    /// 重启分段计时的起点（宿主退出被检测到的时刻）。
+    restart_started: Option<Instant>,
+    /// 深链落地后等待页面稳定的计数。
+    deep_link_ticks: u32,
     /// 自检用：假装拖入的路径。
     simulate_drop: Vec<String>,
     /// 托盘（探测通过才创建）、全局热键、拖拽路径表。
@@ -674,6 +691,8 @@ impl App {
         self.drain_menu(window);
         self.drain_commands(window);
         self.drain_desktop(window);
+        self.settle_deep_link();
+        self.drive_chat_selftest();
 
         if let Some(at) = self.restart_at
             && Instant::now() >= at
@@ -697,6 +716,12 @@ impl App {
         for event in host.poll() {
             match event {
                 HostEvent::Ready(url) => {
+                    if let Some(started) = self.restart_started.take() {
+                        eprintln!(
+                            "dsh-desktop: 重启完成，检测到就绪用时 {} ms",
+                            started.elapsed().as_millis()
+                        );
+                    }
                     self.ready = true;
                     self.origin = Some(url.origin().to_owned());
                     self.ready_since = Some(Instant::now());
@@ -727,6 +752,7 @@ impl App {
                 HostEvent::Exited { code } => {
                     if self.restarts < MAX_AUTO_RESTARTS {
                         self.restarts += 1;
+                        self.restart_started = Some(Instant::now());
                         // 第一次崩溃立刻重启（争取 2 秒内恢复）；之后才退避，避免崩溃循环烧 CPU。
                         let delay = if self.restarts == 1 {
                             Duration::ZERO
@@ -1062,7 +1088,9 @@ impl App {
         let has_device = state.results.iter().any(|row| row.contains("\"device\""));
         let has_host_path = self.simulate_drop.is_empty()
             || state.results.iter().any(|row| row.contains("\"hostPath\""));
-        if !has_device || !has_host_path {
+        let chat_done =
+            !self.selftest_chat || state.results.iter().any(|row| row.contains("\"chat\""));
+        if !has_device || !has_host_path || !chat_done {
             return;
         }
         let output = state.results.join(" ");
@@ -1100,6 +1128,44 @@ impl App {
         {
             window.set_visible(true);
             window.set_focus();
+        }
+    }
+
+    /// 深链目标没有对应路由时是空页：2 秒后仍没内容就退回根页面。
+    fn settle_deep_link(&mut self) {
+        if self.deep_link_ticks == 0 {
+            return;
+        }
+        self.deep_link_ticks += 1;
+        if self.deep_link_ticks == 20 {
+            self.deep_link_ticks = 0;
+            self.probe_script(
+                "JSON.stringify({ deepLinkBody: (document.body.innerText || '').trim().length })",
+            );
+        }
+    }
+
+    /// 壳内对话自检：先输入并回车，再检查页面上有没有回复。
+    fn drive_chat_selftest(&mut self) {
+        if !self.selftest_chat || !self.ready {
+            return;
+        }
+        match self.tick_count {
+            45 => {
+                self.webview
+                    .evaluate_script(
+                        "(function(){var ce=document.querySelector('[contenteditable=\"true\"]');\
+                         if(!ce)return;ce.focus();document.execCommand('insertText',false,'Reply with exactly: OK');\
+                         var b=Array.prototype.slice.call(document.querySelectorAll('button')).filter(function(x){\
+                           return /发送消息|^Send$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim());})[0];\
+                         if(b)b.click();})()",
+                    )
+                    .ok();
+            }
+            150 => self.probe_script(
+                "JSON.stringify({ chat: (document.body.innerText || '').indexOf('OK') >= 0 })",
+            ),
+            _ => {}
         }
     }
 
@@ -1174,6 +1240,7 @@ impl App {
         if rest.is_empty() {
             return None;
         }
+        self.deep_link_ticks = 1;
         Some(format!("{origin}/{rest}"))
     }
 
