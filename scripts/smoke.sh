@@ -52,10 +52,12 @@ scenario_failure_page() {
 import sys
 from PIL import Image, ImageStat
 try:
-    mean = ImageStat.Stat(Image.open(sys.argv[1]).convert("L")).mean[0]
+    stat = ImageStat.Stat(Image.open(sys.argv[1]).convert("L"))
+    mean, spread = stat.mean[0], stat.stddev[0]
 except Exception:
     sys.exit(1)
-sys.exit(0 if mean < 90 else 1)
+# 全黑（未绘制）也可能「很暗」，必须同时要求有内容。
+sys.exit(0 if mean < 90 and spread > 4 else 1)
 PYEOF
     then ok=1; break; fi
     sleep 1
