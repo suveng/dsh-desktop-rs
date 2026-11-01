@@ -68,6 +68,10 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 | 打开 `dsh://` 链接 | `xdg-open dsh://session/abc` → 转发给运行中的实例，导航到 `<origin>/session/abc` |
 | 菜单 | 文件（重新加载 / 打开日志目录 / 退出）、编辑、视图（缩放 / 全屏）、窗口、帮助（含由快捷键表生成的清单） |
 | 宿主崩溃 | 立即重启（第一次不退避，之后 1s）；连续 2 次起不来则显示诊断页 |
+| 托盘 | 有 `StatusNotifierWatcher` 时提供：显示窗口 / 重新加载 / 退出；GNOME 需 AppIndicator 扩展 |
+| 系统通知 | 宿主退出、自动重启、有新版本时发通知；没有通知服务时只记日志 |
+| 全局热键 | `Ctrl+Alt+D` 唤回窗口 |
+| 拖文件进窗口 | 取真实路径，前端按 `@path` 引用而不是上传字节 |
 | 更新提示 | `--update-feed <url>` 或 `DSH_DESKTOP_UPDATE_FEED`；源返回 `{"version","url"}`，有新版就在「帮助 → 检查更新」里提示并打开下载页 |
 
 诊断信息在 `$XDG_STATE_HOME/dsh-desktop-rs/`，窗口几何在 `window.json`。

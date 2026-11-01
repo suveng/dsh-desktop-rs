@@ -125,18 +125,26 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 ---
 
-### D8 托盘与系统通知推迟到 0.2
+### D8 托盘 / 通知 / 全局热键 / 拖拽路径：探测后启用
 
-**决定**：0.1.0 不做托盘图标、全局热键、系统通知。
+**决定**：四项都实现，但**先探测**，不能用的安静降级并在日志里说明原因。不引 D-Bus 客户端库（`global-hotkey`、`notify-rust`、`tray-icon` 自带实现），也不因此引入第二套 UI 框架。
 
 **理由**：
-- 本机会话（`DISPLAY=:0`，无窗口管理器、无 `org.kde.StatusNotifierWatcher`）**无法验证**托盘行为。按 M0 的教训（`docs/spike-webkitgtk.md` §4-2），不能验证的能力不该先写进去。
-- 系统通知需要注册 `GApplication` id，而我们已经有独立的单实例模型（D5），两套「谁是主实例」的机制会互相打架；正确做法是先让单实例成为通知的宿主，再挂 `org.freedesktop.Notifications`。
-- 这两项都是「有更好、没有也能用」的能力，而 0.1.0 的价值在「Linux 上第一次能装上就用」。
+- 早期版本的推迟理由是「本机没有 `StatusNotifierWatcher`」——复审时实测发现**有**：`gdbus` 查询返回 true，托盘真实创建成功。说明「不能验证」这个判断本身需要靠探测而不是靠假设。
+- 但用户环境千差万别（GNOME 默认没有 AppIndicator、无头会话没有通知服务），所以正确形态不是「有/没有」二选一，而是**运行时探测 + 降级 + 说清楚**。
 
-**被否决的方案**：直接加 `tray-icon` + `notify-rust` 并「在 GNOME 上可能不显示」——等于把不可验证的风险塞给用户。
+**实现**：
+- 托盘：`gdbus` 查 `org.kde.StatusNotifierWatcher` → 有才创建（菜单：显示窗口 / 重新加载 / 退出）。
+- 通知：`notify-rust` 走 D-Bus，失败只在日志里记一行，不阻塞主流程。
+- 全局热键：`Ctrl+Alt+D` 唤回窗口；注册失败只记日志。
+- 拖拽路径（R2）：wry 的原生 `DragDropEvent::Drop` 带完整路径，按**文件名**回填给 `__DSH_HOST_PATHS__.pathFor(file)`，取过即出队；WebKitGTK 的 `File` 本身没有 `.path`。
 
-**回归条件**：有了带 WM 与 StatusNotifier 的测试环境后，按 §7 的 #6 / #11 补齐，并在 `docs/` 里补一份 M4 验收。
+**被否决的方案**：
+- 无条件创建托盘（GNOME 上会「创建成功但看不见」，比没有更糟）。
+- 自绘一条 D-Bus 客户端（体积/维护成本远超收益，现有 crate 已经够薄）。
+- 放弃拖拽真实路径、只保留「上传字节」（用户体验明显退化，且实现只多 40 行）。
+
+**验收**：`--selftest --simulate-drop <文件>` 输出 `{"tray":true,"hotkeys":true,"notify":true}` 与 `{"hostPath":"/tmp/…"}`；见 `docs/m2-acceptance.md` §4.2。
 
 ## 4. 架构
 
@@ -241,12 +249,12 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 | 3 | 自定义 `dsh-app://`、反代、header 重写 | **不做**（D2） | — |
 | 4 | 单实例 | 文件锁 + loopback（D5） | M2 |
 | 5 | 原生菜单 | `muda` | M2 |
-| 6 | 托盘 | **未实现**：本机会话没有 `StatusNotifierWatcher`，无法验证；推迟的理由与被否决方案见 [ADR-D8](#d8-托盘与系统通知推迟到-02) | — |
+| 6 | 托盘 | ✅ 已实现：`gdbus` 探测到 `org.kde.StatusNotifierWatcher` 才创建，菜单三动作，见 [ADR-D8](#d8-托盘--通知--全局热键--拖拽路径探测后启用) | M3 |
 | 7 | 自动更新 | ✅ 已实现：读 `--update-feed` / `DSH_DESKTOP_UPDATE_FEED` 指向的 JSON（`{version,url}`），比对版本后用 `updates.status/subscribe` 推给前端、并可从「帮助 → 检查更新」打开下载页；未配置更新源时保持 `idle`、不发请求 | M3 |
 | 8 | 原生目录选择 `__DSH_DIRECTORY_PICKER__` | shim → GTK `FileChooser`（`rfd`） | M2 |
-| 9 | 文件拖拽取真实路径 `__DSH_HOST_PATHS__` | **见 R2**：webview 拿不到 `File.path`，改由原生 GTK drop 目标捕获路径后注入 | M3 |
+| 9 | 文件拖拽取真实路径 `__DSH_HOST_PATHS__` | ✅ 已实现：wry 原生 `DragDropEvent::Drop` 记路径，按文件名回填给 `pathFor(file)`（R2 已收口） | M3 |
 | 10 | 设备信息 `deviceInfo()` | 读 `/etc/os-release` + CPU/内存 | M2 |
-| 11 | 快捷键系统 `keyboard` / `shortcuts` | 只做了**壳级快捷键**（菜单加速键，来自 `bindings()` 表）；全局热键与前端快捷键配置桥接未做，见 ADR-D8 | 部分 |
+| 11 | 快捷键系统 `keyboard` / `shortcuts` | 壳级快捷键（菜单加速键，来自 `bindings()` 表）+ 全局热键 `Ctrl+Alt+D` 均已实现；前端快捷键**配置**（`shortcuts.edit`）仍返回明确拒绝 | M3 |
 | 12 | 内嵌浏览器分区 `browser` | **不做**：外链走系统浏览器；`ui-sidebar-browser` 退化为普通 iframe | — |
 | 13 | 崩溃恢复 | 宿主重启 + 上一次会话 URL 恢复 | M2 |
 | 14 | 窗口状态记忆 | `$XDG_STATE_HOME/dsh-desktop-rs/window.json` | M1 |

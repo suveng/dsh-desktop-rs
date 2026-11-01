@@ -90,8 +90,14 @@
 
   define('dshDesktop', desktop);
   define('__DSH_DIRECTORY_PICKER__', picker);
-  // R2：WebKitGTK 的 File 没有真实路径。返回空串让前端退回「上传字节」。
-  define('__DSH_HOST_PATHS__', { pathFor: () => '' });
+  // 原生 drop 的真实路径由壳按文件名回填（wry 的拖拽事件带完整路径，WebKitGTK 的 File 没有）。
+  define('__DSH_HOST_PATHS__', {
+    pathFor: function (file) {
+      var name = file && file.name ? String(file.name) : '';
+      if (!name) return Promise.resolve('');
+      return call('host-path', { name: name });
+    },
+  });
 
   document.documentElement.setAttribute('data-dsh-desktop-shim', '1');
 })();

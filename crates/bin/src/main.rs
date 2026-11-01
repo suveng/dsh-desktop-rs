@@ -3,6 +3,7 @@
 //! 壳只做四件事（`docs/architecture.md` D1）：拉起宿主进程、开一个 webview 加载它、
 //! 提供原生窗口能力、在它挂掉时给出可操作的诊断。UI 与协议都归上游。
 
+mod desktop;
 mod menu;
 mod update;
 
@@ -108,6 +109,8 @@ struct Cli {
     probe: bool,
     /// 有窗口自检：加载真实前端后检查 shim 是否生效，打印 JSON 后退出。M2 冒烟测试用。
     selftest: bool,
+    /// 自检用：假装拖入了这些路径，验证 `__DSH_HOST_PATHS__` 的真实路径回填。
+    simulate_drop: Vec<String>,
     /// 更新源（JSON：`{"version","url"}`）。缺省时不做任何网络请求。
     update_feed: Option<String>,
     /// 无窗口：只查一次更新并打印 JSON。
@@ -127,6 +130,7 @@ impl Cli {
   --host-cwd <目录>       宿主的工作目录
   --probe                 无窗口：启动宿主并打印就绪 origin 后退出（不打印 token）
   --selftest              有窗口：加载真实前端并检查桌面 shim，打印 JSON 后退出
+  --simulate-drop <path>  自检用：假装拖入一个路径（可重复），验证真实路径回填
   --update-feed <url>     更新源（JSON：{version,url}）；默认读 DSH_DESKTOP_UPDATE_FEED
   --check-update          无窗口：查一次更新并打印 JSON
   -V, --version           打印版本
@@ -144,6 +148,7 @@ impl Cli {
             open_url: None,
             probe: false,
             selftest: false,
+            simulate_drop: Vec::new(),
             update_feed: std::env::var("DSH_DESKTOP_UPDATE_FEED")
                 .ok()
                 .filter(|v| !v.is_empty()),
@@ -172,6 +177,7 @@ impl Cli {
                 "--host-cwd" => cli.host_cwd = Some(PathBuf::from(value(&mut it, "--host-cwd")?)),
                 "--probe" => cli.probe = true,
                 "--selftest" => cli.selftest = true,
+                "--simulate-drop" => cli.simulate_drop.push(value(&mut it, "--simulate-drop")?),
                 "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
                 "--check-update" => cli.check_update = true,
                 "-V" | "--version" => cli.version = true,
@@ -426,11 +432,25 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
 
     let ipc: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let ipc_sink = Arc::clone(&ipc);
+    let drops: Arc<desktop::DropPaths> = Arc::new(desktop::DropPaths::new());
+    let drops_sink = Arc::clone(&drops);
 
     let vbox = window.default_vbox().expect("tao 的 default_vbox 缺失");
     let webview = WebViewBuilder::new()
         .with_html(SKELETON)
         .with_initialization_script(SHIM)
+        // 返回 false：保留 DOM 默认的 drop 行为（前端要靠它拿到 File），
+        // 我们只是顺手记下原生路径，供 `__DSH_HOST_PATHS__.pathFor()` 查。
+        .with_drag_drop_handler(move |event| {
+            if let wry::DragDropEvent::Drop { paths, .. } = event {
+                drops_sink.record(paths);
+                eprintln!(
+                    "dsh-desktop: 拖入 {} 个路径，可用于 @path 引用",
+                    drops_sink.len()
+                );
+            }
+            false
+        })
         .with_ipc_handler(move |request: Request<String>| {
             if let Ok(mut queue) = ipc_sink.lock() {
                 queue.push(request.body().clone());
@@ -469,6 +489,10 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         restart_at: None,
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
+        simulate_drop: cli.simulate_drop.clone(),
+        tray: None,
+        hotkeys: None,
+        drops: Arc::clone(&drops),
         version_note,
         update_status: update::Status::idle(),
         update_rx: None,
@@ -484,6 +508,14 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     };
     if let Some(instance) = &app.instance {
         app.commands = Some(instance.commands());
+    }
+    for path in &app.simulate_drop {
+        drops.record([path.as_str()]);
+    }
+    app.tray = desktop::Tray::create();
+    app.hotkeys = desktop::HotKeys::register();
+    if app.tray.is_some() {
+        eprintln!("dsh-desktop: 托盘已启用");
     }
     app.start_host(&window);
 
@@ -529,6 +561,12 @@ struct App {
     open_url: Option<String>,
     /// host → 页面 的回填脚本，在 tick 里统一 evaluate。
     pending_js: Arc<Mutex<Vec<String>>>,
+    /// 自检用：假装拖入的路径。
+    simulate_drop: Vec<String>,
+    /// 托盘（探测通过才创建）、全局热键、拖拽路径表。
+    tray: Option<desktop::Tray>,
+    hotkeys: Option<desktop::HotKeys>,
+    drops: Arc<desktop::DropPaths>,
     /// 启动时探测到的宿主版本不在支持区间时的说明（D7）。
     version_note: Option<String>,
     /// 更新提示（§7-7）。没有配置更新源时保持 `idle`，不发任何请求。
@@ -587,6 +625,7 @@ impl App {
         self.drain_ipc(window);
         self.drain_menu(window);
         self.drain_commands(window);
+        self.drain_desktop(window);
 
         if let Some(at) = self.restart_at
             && Instant::now() >= at
@@ -730,6 +769,16 @@ impl App {
             ),
             _ => {}
         }
+        if status.phase == "available" {
+            desktop::notify(
+                "有新版本可用",
+                &format!(
+                    "{} → {}",
+                    env!("CARGO_PKG_VERSION"),
+                    status.version.as_deref().unwrap_or("?")
+                ),
+            );
+        }
         self.emit_update(&status);
         self.update_status = status;
     }
@@ -797,6 +846,24 @@ impl App {
                     ));
                 }
                 self.resolve(id, true, &serde_json::Value::String(info));
+            }
+            "host-path" => {
+                let name = request
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let resolved = self.drops.resolve(name);
+                if let Some(state) = self.selftest.as_mut() {
+                    state.results.push(format!(
+                        "{{\"hostPath\":{}}}",
+                        serde_json::Value::String(resolved.clone().unwrap_or_default())
+                    ));
+                }
+                self.resolve(
+                    id,
+                    true,
+                    &serde_json::Value::String(resolved.unwrap_or_default()),
+                )
             }
             "update-status" => {
                 let status: serde_json::Value = serde_json::from_str(&self.update_status.to_json())
@@ -885,6 +952,25 @@ impl App {
             self.webview
                 .evaluate_script("window.dshDesktop.deviceInfo();")
                 .ok();
+            if let Some(first) = self.simulate_drop.first() {
+                let name = std::path::Path::new(first)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let script = format!(
+                    "window.__DSH_HOST_PATHS__.pathFor({{name:{}}});",
+                    serde_json::Value::String(name)
+                );
+                self.webview.evaluate_script(&script).ok();
+            }
+            let tray_on = self.tray.is_some();
+            let hotkeys_on = self.hotkeys.is_some();
+            let notify_on = desktop::notify("dsh-desktop 自检", "桌面集成自检通知");
+            if let Some(state) = self.selftest.as_mut() {
+                state.results.push(format!(
+                    "{{\"tray\":{tray_on},\"hotkeys\":{hotkeys_on},\"notify\":{notify_on}}}"
+                ));
+            }
             self.probe_script(
                 "JSON.stringify({\
                    marker: document.documentElement.getAttribute('data-dsh-desktop-shim'),\
@@ -915,7 +1001,9 @@ impl App {
         };
         // 必须真的等到 deviceInfo 往返的结果（自检的第一条是版本区间，不算数）。
         let has_device = state.results.iter().any(|row| row.contains("\"device\""));
-        if !has_device {
+        let has_host_path = self.simulate_drop.is_empty()
+            || state.results.iter().any(|row| row.contains("\"hostPath\""));
+        if !has_device || !has_host_path {
             return;
         }
         let output = state.results.join(" ");
@@ -923,6 +1011,37 @@ impl App {
         // 自检退出也必须走优雅关闭，否则会留下 4 个孤儿宿主。
         self.shutdown();
         std::process::exit(0);
+    }
+
+    /// 托盘点击与全局热键。
+    fn drain_desktop(&mut self, window: &tao::window::Window) {
+        if let Some(tray) = &self.tray {
+            for action in tray.drain() {
+                match action {
+                    desktop::TRAY_SHOW => {
+                        window.set_visible(true);
+                        window.set_focus();
+                    }
+                    desktop::TRAY_RELOAD => {
+                        self.webview.reload().ok();
+                    }
+                    desktop::TRAY_QUIT => {
+                        self.persist_window_state(window);
+                        self.shutdown();
+                        std::process::exit(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if self
+            .hotkeys
+            .as_ref()
+            .is_some_and(desktop::HotKeys::triggered)
+        {
+            window.set_visible(true);
+            window.set_focus();
+        }
     }
 
     fn drain_menu(&mut self, window: &tao::window::Window) {
@@ -1032,6 +1151,7 @@ impl App {
     }
 
     fn fail(&mut self, window: &tao::window::Window, summary: &str, detail: &str) {
+        desktop::notify(summary, detail);
         self.failure = Some((summary.to_owned(), detail.to_owned()));
         window.set_title(&format!("{APP_TITLE} — 启动失败"));
         self.webview

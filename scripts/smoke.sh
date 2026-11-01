@@ -87,6 +87,10 @@ scenario_selftest() {
   esac
   # D7：版本区间与更新状态必须出现在自检输出里（实现存在，而不是只写在文档里）。
   case "$flat" in
+    *'"tray"'*'"hotkeys"'*'"notify"'*) ;;
+    *) fail "缺少桌面集成能力状态：$out" ;;
+  esac
+  case "$flat" in
     *'"versionNote"'*) ;;
     *) fail "缺少版本区间探测：$out" ;;
   esac

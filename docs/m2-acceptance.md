@@ -68,10 +68,21 @@ dsh://x/y?z  →  <origin>/x/y?z
 3. **更新提示曾是个假桩**：现在是真的读更新源（`{version,url}`）、比对版本、推给前端 `updates.status/subscribe`、并可从「帮助 → 检查更新」打开下载页；没配更新源时保持 `idle` 且不发任何请求。
 4. **测试偶发 `ETXTBSY`**：并行用例里「刚写出的脚本立刻 exec」会撞内核的 i_writecount，测试入口改为带重试的 `spawn_host`，连续 6 轮全绿。
 
+## 4.2 桌面集成四项（复审后补齐）
+
+早先以「本机无法验证」为由推迟的四项，经用户确认改为**现在实现**。复审时实测发现本机其实**有** `StatusNotifierWatcher`（`gdbus` 查询返回 true），也就是说原来的判断依据本身是错的。
+
+| 能力 | 实现 | 证据 |
+|---|---|---|
+| 托盘 | `gdbus` 探测 → 创建托盘（显示窗口/重新加载/退出） | 运行日志 `托盘已启用`；selftest `{"tray":true}` |
+| 系统通知 | `notify-rust`（D-Bus），失败只记日志 | selftest `{"notify":true}`（真的弹了一条「dsh-desktop 自检」） |
+| 全局热键 | `Ctrl+Alt+D` 唤回窗口 | 日志 `全局热键 Ctrl+Alt+D 已注册`；selftest `{"hotkeys":true}` |
+| 拖拽真实路径 | wry `DragDropEvent::Drop` 记路径，按文件名回填 `pathFor(file)` | `--selftest --simulate-drop /tmp/m2/sample.txt` → `{"hostPath":"/tmp/m2/sample.txt"}`；另有 4 个单测覆盖「按名取用/取过即出队/新批次覆盖旧批次/空名不匹配」 |
+
+降级策略写在 `architecture.md` 的 ADR-D8：探测不过就不创建，并在日志里说明原因 —— 不做「创建成功但看不见」的托盘。
+
 ## 5. 已知未覆盖
 
-- 托盘（`tray-icon`）：本机没有 `org.kde.StatusNotifierWatcher`，GNOME 需要扩展；M3 只做「有扩展才显示」的探测，不给假承诺。
-- 系统通知：同上，M3 用 `notify-rust` 的可用性探测。
 - 真实窗口管理器下的菜单/焦点行为（本机 X11 会话无 WM）。
 - 目录选择对话框的自动化测试（原生模态框在 xvfb 里无法可靠驱动，只验证了 API 存在且可调用）。
 
