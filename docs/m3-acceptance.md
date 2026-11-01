@@ -41,6 +41,7 @@
   ```
   这一条留作 M4 的 CI 项。
 - **托盘 / 系统通知 / 全局热键未做**：理由与被否决方案写在 `architecture.md` 的 **ADR-D8**。本机会话没有窗口管理器、也没有 `StatusNotifierWatcher`，无法验证的东西不先写进去。
+- **更新提示**：已实现并在 M2 复审里补上（`--check-update` 三条路径：无源→idle、有新版→available、同版本→up-to-date）。
 - **「从应用菜单启动并完成一次对话」**：菜单项与 MIME 关联都用 `desktop-file-validate` / `xdg-mime` 校验过；「点菜单 → 发消息」这一步需要图形会话里的人手操作，本机无 WM 无法脚本化，等价证据是 `--selftest`（真实前端 + 真实宿主 + 真实 IPC 往返）与 M0 的对话闭环。
 
 ## 4. 打包踩到的两个小坑

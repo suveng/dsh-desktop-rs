@@ -20,6 +20,23 @@ fn fake_host(body: &str) -> PathBuf {
     path
 }
 
+/// 刚写出的可执行脚本被 exec 时，内核可能还看到 i_writecount>0 而返回 ETXTBSY。
+/// 并行测试下这是可复现的，所以统一走这个重试入口。
+fn spawn_host(spec: LaunchSpec) -> Host {
+    let mut last = None;
+    for _ in 0..10 {
+        match Host::spawn(spec.clone()) {
+            Ok(host) => return host,
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                last = Some(err);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Err(err) => panic!("spawn: {err}"),
+        }
+    }
+    panic!("spawn 持续 ETXTBSY：{last:?}");
+}
+
 fn spec(script: PathBuf, ready_timeout: Duration) -> LaunchSpec {
     LaunchSpec::new(script)
         .ready_timeout(ready_timeout)
@@ -57,7 +74,7 @@ fn find_ready(events: &[Event]) -> Option<&ReadyUrl> {
 #[test]
 fn ready_url_is_parsed_and_never_leaks_in_debug() {
     let script = fake_host(r#"echo "dsh web: http://127.0.0.1:4444/?token=s3cret"; sleep 30"#);
-    let mut host = Host::spawn(spec(script, Duration::from_secs(5))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_secs(5)));
 
     let events = drain_until(&mut host, Duration::from_secs(5), |e| {
         matches!(e, Event::Ready(_))
@@ -80,7 +97,7 @@ fn ready_url_is_parsed_and_never_leaks_in_debug() {
 fn delayed_ready_line_is_still_accepted() {
     let script =
         fake_host(r#"sleep 1; echo "dsh web: http://127.0.0.1:4445/?token=abc"; sleep 30"#);
-    let mut host = Host::spawn(spec(script, Duration::from_secs(5))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_secs(5)));
     let started = Instant::now();
     let events = drain_until(&mut host, Duration::from_secs(5), |e| {
         matches!(e, Event::Ready(_))
@@ -93,7 +110,7 @@ fn delayed_ready_line_is_still_accepted() {
 #[test]
 fn missing_ready_line_times_out_with_actionable_message() {
     let script = fake_host("sleep 30");
-    let mut host = Host::spawn(spec(script, Duration::from_millis(300))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_millis(300)));
     let events = drain_until(&mut host, Duration::from_secs(5), |e| {
         matches!(e, Event::Failed(_))
     });
@@ -111,7 +128,7 @@ fn missing_ready_line_times_out_with_actionable_message() {
 #[test]
 fn crash_after_ready_reports_exit_code() {
     let script = fake_host(r#"echo "dsh web: http://127.0.0.1:4446/?token=x"; exit 1"#);
-    let mut host = Host::spawn(spec(script, Duration::from_secs(5))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_secs(5)));
     let events = drain_until(&mut host, Duration::from_secs(5), |e| {
         matches!(e, Event::Exited { code: Some(1) })
     });
@@ -127,7 +144,7 @@ fn crash_after_ready_reports_exit_code() {
 #[test]
 fn non_zero_exit_without_ready_is_reported() {
     let script = fake_host(r#"echo "error: profile web failed to initialize" >&2; exit 3"#);
-    let mut host = Host::spawn(spec(script, Duration::from_secs(30))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_secs(30)));
     let events = drain_until(&mut host, Duration::from_secs(5), |e| {
         matches!(e, Event::Exited { .. })
     });
@@ -151,7 +168,7 @@ fn stop_kills_the_whole_process_group() {
     let script = fake_host(
         r#"sleep 300 & echo "grandchild=$!" >&2; echo "dsh web: http://127.0.0.1:4447/?token=g"; wait"#,
     );
-    let mut host = Host::spawn(spec(script, Duration::from_secs(5))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_secs(5)));
 
     let events = drain_until(
         &mut host,
@@ -181,7 +198,7 @@ fn stop_kills_the_whole_process_group() {
 #[test]
 fn drop_stops_the_host() {
     let script = fake_host(r#"echo "dsh web: http://127.0.0.1:4448/?token=d"; sleep 300"#);
-    let mut host = Host::spawn(spec(script, Duration::from_secs(5))).expect("spawn");
+    let mut host = spawn_host(spec(script, Duration::from_secs(5)));
     let pid = host.pid();
     drain_until(&mut host, Duration::from_secs(5), |e| {
         matches!(e, Event::Ready(_))

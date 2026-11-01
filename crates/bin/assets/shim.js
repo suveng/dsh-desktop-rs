@@ -34,6 +34,18 @@
   const unsupported = (what) => () => Promise.reject(new Error('dsh-desktop: 不支持 ' + what));
   const noop = () => {};
 
+  // 更新状态由壳推过来：前端订阅的是这里注册的监听者。
+  const updateListeners = new Set();
+  window.__dshShimEmitUpdate = function (state) {
+    updateListeners.forEach(function (listener) {
+      try {
+        listener(state);
+      } catch (_error) {
+        /* 单个监听者报错不该影响其它订阅者 */
+      }
+    });
+  };
+
   const desktop = {
     protocolVersion: 1,
     deviceInfo: () => call('device-info'),
@@ -57,9 +69,14 @@
       subscribe: () => noop,
     },
     updates: {
-      status: () => Promise.resolve({ phase: 'idle' }),
-      open: () => Promise.resolve(),
-      subscribe: () => noop,
+      status: () => call('update-status'),
+      open: () => call('update-open'),
+      subscribe: function (listener) {
+        updateListeners.add(listener);
+        return function () {
+          updateListeners.delete(listener);
+        };
+      },
     },
   };
 

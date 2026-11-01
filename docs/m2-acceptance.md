@@ -14,7 +14,7 @@
 | shim 生效 | ✅ | selftest：`marker=1`、`protocolVersion=1`、`directoryPicker=true`、`hostPaths=true`、`deviceInfoType=function` |
 | deviceInfo 真实往返 | ✅ | 返回 `dsh-desktop 0.1.0 · Ubuntu 24.04.5 LTS · x86_64 · ubuntu:GNOME`（请求与回填两侧都有日志） |
 | 前端插件不被 shim 打挂 | ✅ | `pluginError=false` —— 见 §3 的 bug |
-| `kill -9` 宿主 2 秒内恢复 | ✅ **1908 ms** | 新宿主 pid 出现、窗口标题回到 `DeepSeek Harness` |
+| `kill -9` 宿主 2 秒内恢复 | ✅ **975 ms** | 用编译产物启动宿主（`apps/cli/lib/bin.js`，冷启动 785ms），第一次崩溃立即重启；`pnpm dsh` 路径是 1885ms 冷启动，测出来 3.1s，所以默认优先用编译产物 |
 | 连续崩溃 2 次后进失败页 | ✅ | 连续 kill 3 次后标题变为 `DeepSeek Harness — 启动失败` |
 | 冒烟测试可自动化 | ✅ | `xvfb-run -a bash scripts/smoke.sh` → `SMOKE OK`，失败页与基线 **0 像素差异** |
 
@@ -58,6 +58,15 @@ dsh://x/y?z  →  <origin>/x/y?z
 ```
 
 这写在 `architecture.md` §7-15。真正的「打开某个会话」需要上游提供路由或事件通道，属于应用内行为，不在壳的范围里。
+
+## 4.1 复审后修正（2026-11-01 12:05）
+
+独立审计指出三条实测问题，已修：
+
+1. **恢复时延曾超 2 秒**：旧实现无差别退避 1s，加上 `pnpm dsh` 1.9s 冷启动 → 3.1s。现在第一次崩溃**不退避**，并新增「优先用 `apps/cli/lib/bin.js`」的宿主解析（785ms 冷启动），实测 **975ms**。
+2. **`--version` 探测缺失（D7）**：现已实现（5 秒超时、区间比较、日志 + 标题提示、进自检输出），两个方向都验过：全局 `dsh 0.1.1-rc.2` 报「不在支持区间」，工作区 `0.2.2-alpha.2` 报 `in-range`。
+3. **更新提示曾是个假桩**：现在是真的读更新源（`{version,url}`）、比对版本、推给前端 `updates.status/subscribe`、并可从「帮助 → 检查更新」打开下载页；没配更新源时保持 `idle` 且不发任何请求。
+4. **测试偶发 `ETXTBSY`**：并行用例里「刚写出的脚本立刻 exec」会撞内核的 i_writecount，测试入口改为带重试的 `spawn_host`，连续 6 轮全绿。
 
 ## 5. 已知未覆盖
 

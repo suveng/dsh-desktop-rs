@@ -22,6 +22,7 @@ pub enum Action {
     ToggleFullscreen,
     Minimize,
     About,
+    CheckUpdate,
 }
 
 impl Action {
@@ -37,6 +38,7 @@ impl Action {
             Self::ToggleFullscreen => "fullscreen",
             Self::Minimize => "minimize",
             Self::About => "about",
+            Self::CheckUpdate => "check-update",
         }
     }
 }
@@ -122,7 +124,13 @@ fn bindings() -> Vec<(&'static str, Vec<Binding>)> {
                 "Ctrl+M",
             )],
         ),
-        ("帮助", vec![b(Action::About, "关于 dsh-desktop", None, "")]),
+        (
+            "帮助",
+            vec![
+                b(Action::CheckUpdate, "检查更新", None, ""),
+                b(Action::About, "关于 dsh-desktop", None, ""),
+            ],
+        ),
     ]
 }
 

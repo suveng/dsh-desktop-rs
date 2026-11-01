@@ -2,7 +2,7 @@
 
 > 一个用 Rust 写的 DeepSeek Harness 桌面客户端。首个交付平台：**Linux**。
 >
-> 状态：设计稿（未编码）。所有关于 dsh 的事实都标注了源码位置，位于 `/home/suveng/github/deepseek-harness`（version 0.2.2-alpha.2，HEAD `ce7073d512`）。
+  > 状态：**0.1.0 已实现并验收**（M0–M3，见 `docs/m*-acceptance.md`）。所有关于 dsh 的事实都标注了源码位置，位于 `/home/suveng/github/deepseek-harness`（version 0.2.2-alpha.2，HEAD `ce7073d512`）。
 
 ---
 
@@ -117,7 +117,7 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **理由**：desigma 的 `desigma-net/src/lib.rs:8-11` 已经证明这是「GUI 主循环 + 网络世界」的正确接缝；反过来把 runtime 塞进 UI 线程会污染所有调用点。
 
-### D7 版本态度：探测 + 报警，不硬拦
+### D7 版本态度：探测 + 报警，不硬拦（✅ 已实现）
 
 **决定**：启动时执行 `dsh --version`，与内置的 `SUPPORTED = ">=0.2.2-alpha.2 <0.3"` 比对。不匹配 → 标题栏横幅 + 日志，不阻止启动。
 
@@ -242,7 +242,7 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 | 4 | 单实例 | 文件锁 + loopback（D5） | M2 |
 | 5 | 原生菜单 | `muda` | M2 |
 | 6 | 托盘 | **未实现**：本机会话没有 `StatusNotifierWatcher`，无法验证；推迟的理由与被否决方案见 [ADR-D8](#d8-托盘与系统通知推迟到-02) | — |
-| 7 | 自动更新 | 检查 `download.deepseek.com` 清单；M3 只做「有新版就提示 + 打开下载页」 | M3 |
+| 7 | 自动更新 | ✅ 已实现：读 `--update-feed` / `DSH_DESKTOP_UPDATE_FEED` 指向的 JSON（`{version,url}`），比对版本后用 `updates.status/subscribe` 推给前端、并可从「帮助 → 检查更新」打开下载页；未配置更新源时保持 `idle`、不发请求 | M3 |
 | 8 | 原生目录选择 `__DSH_DIRECTORY_PICKER__` | shim → GTK `FileChooser`（`rfd`） | M2 |
 | 9 | 文件拖拽取真实路径 `__DSH_HOST_PATHS__` | **见 R2**：webview 拿不到 `File.path`，改由原生 GTK drop 目标捕获路径后注入 | M3 |
 | 10 | 设备信息 `deviceInfo()` | 读 `/etc/os-release` + CPU/内存 | M2 |

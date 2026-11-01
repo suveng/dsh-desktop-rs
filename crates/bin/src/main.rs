@@ -4,6 +4,7 @@
 //! 提供原生窗口能力、在它挂掉时给出可操作的诊断。UI 与协议都归上游。
 
 mod menu;
+mod update;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -79,6 +80,12 @@ fn main() {
         return;
     }
 
+    if cli.check_update {
+        let status = update::check(cli.update_feed.as_deref(), env!("CARGO_PKG_VERSION"));
+        println!("UPDATE {}", status.to_json());
+        return;
+    }
+
     let code = if cli.probe {
         run_probe(&cli)
     } else {
@@ -101,6 +108,10 @@ struct Cli {
     probe: bool,
     /// 有窗口自检：加载真实前端后检查 shim 是否生效，打印 JSON 后退出。M2 冒烟测试用。
     selftest: bool,
+    /// 更新源（JSON：`{"version","url"}`）。缺省时不做任何网络请求。
+    update_feed: Option<String>,
+    /// 无窗口：只查一次更新并打印 JSON。
+    check_update: bool,
     version: bool,
     help: bool,
 }
@@ -111,10 +122,13 @@ impl Cli {
 
   --host-program <路径>   直接指定宿主可执行文件（默认在 PATH 里找 `dsh`，找不到则回退 `pnpm dsh`）
   --host-cmd <命令>       指定完整启动前缀，如 --host-cmd \"pnpm dsh\"（优先于 --host-program）
+                          （都不给时：先找 PATH 里的 dsh，再找 <cwd>/apps/cli/lib/bin.js，最后 pnpm dsh）
   --host-arg <参数>       追加一个宿主参数（可重复），排在标准参数之后
   --host-cwd <目录>       宿主的工作目录
   --probe                 无窗口：启动宿主并打印就绪 origin 后退出（不打印 token）
   --selftest              有窗口：加载真实前端并检查桌面 shim，打印 JSON 后退出
+  --update-feed <url>     更新源（JSON：{version,url}）；默认读 DSH_DESKTOP_UPDATE_FEED
+  --check-update          无窗口：查一次更新并打印 JSON
   -V, --version           打印版本
   -h, --help              打印本帮助
 
@@ -130,6 +144,10 @@ impl Cli {
             open_url: None,
             probe: false,
             selftest: false,
+            update_feed: std::env::var("DSH_DESKTOP_UPDATE_FEED")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            check_update: false,
             version: false,
             help: false,
         };
@@ -154,6 +172,8 @@ impl Cli {
                 "--host-cwd" => cli.host_cwd = Some(PathBuf::from(value(&mut it, "--host-cwd")?)),
                 "--probe" => cli.probe = true,
                 "--selftest" => cli.selftest = true,
+                "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
+                "--check-update" => cli.check_update = true,
                 "-V" | "--version" => cli.version = true,
                 "-h" | "--help" => cli.help = true,
                 other if other.starts_with("dsh://") => cli.open_url = Some(other.to_owned()),
@@ -179,19 +199,90 @@ const STANDARD_ARGS: [&str; 7] = [
     "--no-open",
 ];
 
+/// 宿主命令：可执行文件 + 插在标准参数之前的参数。
+fn host_command(cli: &Cli) -> (PathBuf, Vec<String>) {
+    if let Some(parts) = &cli.host_cmd {
+        return (PathBuf::from(&parts[0]), parts[1..].to_vec());
+    }
+    if let Some(path) = &cli.host_program {
+        return (path.clone(), Vec::new());
+    }
+    if let Some(path) = which("dsh") {
+        return (path, Vec::new());
+    }
+    // 源码工作区：优先跑编译产物（~0.8s 就绪），退而求其次才走 pnpm（~1.9s）。
+    match compiled_harness_entry(cli) {
+        Some(entry) => (PathBuf::from("node"), vec![entry.display().to_string()]),
+        None => (PathBuf::from("pnpm"), vec!["dsh".to_owned()]),
+    }
+}
+
+/// 支持区间的下界（`architecture.md` D7）。
+const MIN_HOST_VERSION: &str = "0.2.2-alpha.2";
+
+/// 跑一次 `--version`（带 5 秒超时），拿到宿主版本。
+fn probe_host_version(cli: &Cli) -> Option<String> {
+    let (program, prefix) = host_command(cli);
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&prefix)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = &cli.host_cwd {
+        cmd.current_dir(cwd);
+    }
+
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    }
+
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read as _;
+        stdout.read_to_string(&mut out).ok()?;
+    }
+    parse_version(&out)
+}
+
+fn parse_version(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .map(|token| token.trim_start_matches('v'))
+        .find(|token| {
+            token.contains('.') && token.chars().next().is_some_and(|c| c.is_ascii_digit())
+        })
+        .map(str::to_owned)
+}
+
+/// 不在支持区间时给一句能贴到 issue 里的话；在区间内返回 `None`。
+fn version_note(version: &str) -> Option<String> {
+    let in_minor = {
+        let mut parts = version.split('.');
+        parts.next() == Some("0") && parts.next() == Some("2")
+    };
+    let at_least_min = !update::is_newer(MIN_HOST_VERSION, version);
+    if in_minor && at_least_min {
+        None
+    } else {
+        Some(format!(
+            "dsh {version} 不在支持区间（{MIN_HOST_VERSION} ≤ v < 0.3）"
+        ))
+    }
+}
+
 /// 把 CLI 变成一份启动说明。
 fn launch_spec(cli: &Cli) -> LaunchSpec {
-    let (program, prefix): (PathBuf, Vec<String>) = if let Some(parts) = &cli.host_cmd {
-        (PathBuf::from(&parts[0]), parts[1..].to_vec())
-    } else if let Some(path) = &cli.host_program {
-        (path.clone(), Vec::new())
-    } else {
-        match which("dsh") {
-            Some(path) => (path, Vec::new()),
-            // 源码工作区的常见形态：`pnpm dsh --profile web …`。
-            None => (PathBuf::from("pnpm"), vec!["dsh".to_owned()]),
-        }
-    };
+    let (program, prefix) = host_command(cli);
 
     let mut spec = LaunchSpec::new(program).args(prefix).args(STANDARD_ARGS);
     if !cli.host_args.is_empty() {
@@ -201,6 +292,18 @@ fn launch_spec(cli: &Cli) -> LaunchSpec {
         spec = spec.cwd(cwd);
     }
     spec
+}
+
+/// 找到 deepseek-harness 的编译产物入口：`apps/cli/lib/bin.js`。
+///
+/// 它比 `pnpm dsh` 快一倍以上（785ms vs 1885ms 就绪），直接决定崩溃恢复能不能进 2 秒。
+fn compiled_harness_entry(cli: &Cli) -> Option<PathBuf> {
+    let base = cli
+        .host_cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())?;
+    let entry = base.join("apps/cli/lib/bin.js");
+    entry.is_file().then_some(entry)
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -292,6 +395,12 @@ fn run_window(cli: Cli) -> i32 {
 
 fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let spec = launch_spec(&cli);
+
+    // D7：探测 + 报警，不硬拦。
+    let version_note = probe_host_version(&cli).as_deref().and_then(version_note);
+    if let Some(note) = &version_note {
+        eprintln!("dsh-desktop: {note}");
+    }
     let saved = load_window_state().unwrap_or_default();
 
     let event_loop = EventLoop::new();
@@ -360,6 +469,10 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         restart_at: None,
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
+        version_note,
+        update_status: update::Status::idle(),
+        update_rx: None,
+        update_feed: cli.update_feed.clone(),
         selftest: cli.selftest.then(Selftest::default),
         tick_count: 0,
         logs: VecDeque::with_capacity(LOG_TAIL),
@@ -416,6 +529,12 @@ struct App {
     open_url: Option<String>,
     /// host → 页面 的回填脚本，在 tick 里统一 evaluate。
     pending_js: Arc<Mutex<Vec<String>>>,
+    /// 启动时探测到的宿主版本不在支持区间时的说明（D7）。
+    version_note: Option<String>,
+    /// 更新提示（§7-7）。没有配置更新源时保持 `idle`，不发任何请求。
+    update_status: update::Status,
+    update_rx: Option<std::sync::mpsc::Receiver<update::Status>>,
+    update_feed: Option<String>,
     /// `--selftest` 的阶段与结果。
     selftest: Option<Selftest>,
     /// 自检看的是「加载完成之后又跑了几帧」，用帧数比用时钟更稳。
@@ -429,6 +548,13 @@ struct App {
 }
 
 impl App {
+    fn title_for(&self, base: &str) -> String {
+        match &self.version_note {
+            Some(note) => format!("{base} · {note}"),
+            None => base.to_owned(),
+        }
+    }
+
     fn start_host(&mut self, window: &tao::window::Window) {
         if let Some(mut old) = self.host.take() {
             old.stop();
@@ -437,7 +563,8 @@ impl App {
         self.failure = None;
         self.logs.clear();
         self.webview.load_html(SKELETON).ok();
-        window.set_title(&format!("{APP_TITLE} — 正在启动…"));
+        window.set_title(&self.title_for(&format!("{APP_TITLE} — 正在启动…")));
+        eprintln!("dsh-desktop: 启动 {}", self.spec.command_line());
 
         match Host::spawn(self.spec.clone()) {
             Ok(host) => self.host = Some(host),
@@ -454,6 +581,7 @@ impl App {
     fn tick(&mut self, window: &tao::window::Window) {
         self.tick_count = self.tick_count.saturating_add(1);
         self.flush_pending_js();
+        self.poll_update();
         self.drive_selftest();
         self.finish_selftest_if_done();
         self.drain_ipc(window);
@@ -486,7 +614,8 @@ impl App {
                     self.origin = Some(url.origin().to_owned());
                     self.ready_since = Some(Instant::now());
                     self.navigate_deep_link();
-                    window.set_title(APP_TITLE);
+                    self.start_update_check();
+                    window.set_title(&self.title_for(APP_TITLE));
                     if let Err(err) = self.webview.load_url(url.as_str()) {
                         self.fail(
                             window,
@@ -507,11 +636,17 @@ impl App {
                 HostEvent::Exited { code } => {
                     if self.restarts < MAX_AUTO_RESTARTS {
                         self.restarts += 1;
-                        let delay = Duration::from_secs(u64::from(self.restarts));
+                        // 第一次崩溃立刻重启（争取 2 秒内恢复）；之后才退避，避免崩溃循环烧 CPU。
+                        let delay = if self.restarts == 1 {
+                            Duration::ZERO
+                        } else {
+                            Duration::from_secs(1)
+                        };
                         self.restart_at = Some(Instant::now() + delay);
                         self.ready = false;
                         self.ready_since = None;
-                        window.set_title(&format!("{APP_TITLE} — 本地服务重启中…"));
+                        window
+                            .set_title(&self.title_for(&format!("{APP_TITLE} — 本地服务重启中…")));
                         self.webview.load_html(SKELETON).ok();
                     } else {
                         self.fail(
@@ -559,6 +694,84 @@ impl App {
         }
     }
 
+    fn start_update_check(&mut self) {
+        let Some(feed) = self.update_feed.clone() else {
+            return;
+        };
+        if self.update_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        let current = env!("CARGO_PKG_VERSION").to_owned();
+        std::thread::spawn(move || {
+            let status = update::check(Some(&feed), &current);
+            let _ = tx.send(status);
+        });
+    }
+
+    fn poll_update(&mut self) {
+        let Some(rx) = self.update_rx.as_ref() else {
+            return;
+        };
+        let Ok(status) = rx.try_recv() else {
+            return;
+        };
+        self.update_rx = None;
+        match status.phase {
+            "available" => eprintln!(
+                "dsh-desktop: 有新版本 {}（当前 {}）",
+                status.version.as_deref().unwrap_or("?"),
+                env!("CARGO_PKG_VERSION")
+            ),
+            "error" => eprintln!(
+                "dsh-desktop: 检查更新失败：{}",
+                status.failure.as_deref().unwrap_or("未知原因")
+            ),
+            _ => {}
+        }
+        self.emit_update(&status);
+        self.update_status = status;
+    }
+
+    /// 把更新状态推给页面里的监听者（shim 的 `updates.subscribe`）。
+    fn emit_update(&self, status: &update::Status) {
+        if let Ok(mut queue) = self.pending_js.lock() {
+            queue.push(format!(
+                "window.__dshShimEmitUpdate && window.__dshShimEmitUpdate({});",
+                status.to_json()
+            ));
+        }
+    }
+
+    fn check_update_now(&mut self, window: &tao::window::Window) {
+        if self.update_feed.is_none() {
+            self.show_message(window, "检查更新", "没有配置更新源。\n用 --update-feed <url> 或环境变量 DSH_DESKTOP_UPDATE_FEED 指定。");
+            return;
+        }
+        self.update_rx = None;
+        self.start_update_check();
+        self.show_message(
+            window,
+            "检查更新",
+            &format!("正在检查…（当前版本 {}）", env!("CARGO_PKG_VERSION")),
+        );
+    }
+
+    fn show_message(&self, window: &tao::window::Window, title: &str, body: &str) {
+        use gtk::prelude::{DialogExt as _, GtkWindowExt as _, ObjectExt as _};
+        let dialog = gtk::MessageDialog::new(
+            Some(window.gtk_window()),
+            gtk::DialogFlags::MODAL,
+            gtk::MessageType::Info,
+            gtk::ButtonsType::Close,
+            title,
+        );
+        dialog.set_property("secondary-text", body);
+        dialog.run();
+        dialog.close();
+    }
+
     /// 处理来自 `assets/shim.js` 的请求。
     fn handle_shim(&mut self, raw: &str) {
         let Ok(request) = serde_json::from_str::<serde_json::Value>(raw) else {
@@ -584,6 +797,17 @@ impl App {
                     ));
                 }
                 self.resolve(id, true, &serde_json::Value::String(info));
+            }
+            "update-status" => {
+                let status: serde_json::Value = serde_json::from_str(&self.update_status.to_json())
+                    .unwrap_or(serde_json::Value::Null);
+                self.resolve(id, true, &status);
+            }
+            "update-open" => {
+                if let Some(url) = self.update_status.url.clone() {
+                    spawn_detached("xdg-open", &[&url]);
+                }
+                self.resolve(id, true, &serde_json::Value::Null);
             }
             "pick-directory" => match pick_directory() {
                 Some(path) => self.resolve(id, true, &serde_json::Value::String(path)),
@@ -644,6 +868,19 @@ impl App {
 
         if state.stage == 0 {
             state.stage = 1;
+            // 版本区间（D7）与更新状态也一起进自检输出，免得只能靠看标题。
+            let version_note = self
+                .version_note
+                .clone()
+                .unwrap_or_else(|| "in-range".to_owned());
+            let update_phase = self.update_status.phase.to_owned();
+            if let Some(state) = self.selftest.as_mut() {
+                state.results.push(format!(
+                    "{{\"versionNote\":{},\"updatePhase\":{}}}",
+                    serde_json::Value::String(version_note),
+                    serde_json::Value::String(update_phase)
+                ));
+            }
             // 主动调一次 deviceInfo：既验证 IPC 往返，也顺带把结果记进自检输出。
             self.webview
                 .evaluate_script("window.dshDesktop.deviceInfo();")
@@ -676,7 +913,9 @@ impl App {
         let Some(state) = self.selftest.as_ref() else {
             return;
         };
-        if state.results.len() < 2 {
+        // 必须真的等到 deviceInfo 往返的结果（自检的第一条是版本区间，不算数）。
+        let has_device = state.results.iter().any(|row| row.contains("\"device\""));
+        if !has_device {
             return;
         }
         let output = state.results.join(" ");
@@ -713,6 +952,7 @@ impl App {
                 }
                 menu::Action::Minimize => window.set_minimized(true),
                 menu::Action::About => self.show_about(window),
+                menu::Action::CheckUpdate => self.check_update_now(window),
             }
         }
     }
@@ -733,6 +973,7 @@ impl App {
                 Command::OpenUrl(url) => {
                     self.open_url = Some(url);
                     self.navigate_deep_link();
+                    self.start_update_check();
                 }
             }
         }

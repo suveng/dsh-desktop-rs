@@ -42,10 +42,16 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 
 壳不内置 dsh，它启动的是你本机的 `dsh`：
 
-- 在 `PATH` 里能找到一个可用的 `dsh`，**或者**
-- 用 `--host-cmd "pnpm dsh" --host-cwd <deepseek-harness 源码目录>` 指定源码工作区。
+壳按这个顺序找宿主：
 
-dsh 版本建议落在 `>=0.2.2-alpha.2 <0.3`；不在区间内不会拦你，但会在日志里提示。
+1. `--host-cmd "pnpm dsh"` / `--host-program <路径>`（显式指定）
+2. `PATH` 里的 `dsh`
+3. `<cwd>/apps/cli/lib/bin.js`（dsh 源码工作区的编译产物，**就绪只要 ~0.8s**）
+4. `pnpm dsh`
+
+推荐第 3 种：它比 `pnpm dsh`（~1.9s）快一倍以上，也是崩溃恢复能进 2 秒的前提。
+
+启动时会跑一次 `dsh --version`：落在 `>=0.2.2-alpha.2 <0.3` 之外不会拦你，但会在日志与窗口标题上说明。
 
 ## 升级
 
@@ -61,7 +67,8 @@ dsh 版本建议落在 `>=0.2.2-alpha.2 <0.3`；不在区间内不会拦你，�
 | 第二次启动 | 只把已有窗口提到前面，不会再起一个宿主 |
 | 打开 `dsh://` 链接 | `xdg-open dsh://session/abc` → 转发给运行中的实例，导航到 `<origin>/session/abc` |
 | 菜单 | 文件（重新加载 / 打开日志目录 / 退出）、编辑、视图（缩放 / 全屏）、窗口、帮助（含由快捷键表生成的清单） |
-| 宿主崩溃 | 自动重启（1s→2s 退避）；连续 2 次起不来则显示诊断页 |
+| 宿主崩溃 | 立即重启（第一次不退避，之后 1s）；连续 2 次起不来则显示诊断页 |
+| 更新提示 | `--update-feed <url>` 或 `DSH_DESKTOP_UPDATE_FEED`；源返回 `{"version","url"}`，有新版就在「帮助 → 检查更新」里提示并打开下载页 |
 
 诊断信息在 `$XDG_STATE_HOME/dsh-desktop-rs/`，窗口几何在 `window.json`。
 
