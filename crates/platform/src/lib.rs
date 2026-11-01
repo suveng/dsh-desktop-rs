@@ -7,6 +7,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod instance;
+
 use serde::{Deserialize, Serialize};
 
 /// 应用名，用作目录名与桌面文件名。
