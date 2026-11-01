@@ -88,8 +88,23 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 | 全局热键 | `Ctrl+Alt+D` 唤回窗口 |
 | 拖文件进窗口 | 取真实路径，前端按 `@path` 引用而不是上传字节 |
 | 更新提示 | `--update-feed <url>` 或 `DSH_DESKTOP_UPDATE_FEED`；源返回 `{"version","url"}`，有新版就在「帮助 → 检查更新」里提示并打开下载页 |
+| 重启本地服务（不关窗口） | `scripts/restart-host.sh`（`--delay N` 延迟 N 秒、`--dry-run` 只看计划）；结束宿主后由 supervisor 立刻拉起新的，窗口自动导航到新端口 |
 
 诊断信息在 `$XDG_STATE_HOME/dsh-desktop-rs/`，窗口几何在 `window.json`。
+
+### 自动重启本地服务
+
+改了 profile / 装了新插件 / 换了插件版本后，宿主必须重新起一次才会读新的 profile。不想关窗口时用：
+
+```bash
+scripts/restart-host.sh            # 立即重启
+scripts/restart-host.sh --delay 60 # 60 秒后重启（让正在进行的回复先送出去）
+scripts/restart-host.sh --dry-run  # 只打印计划
+```
+
+脚本只结束宿主进程（`node …/bin.js --profile web`），不动桌面壳与窗口；每一步都追加到
+`$XDG_STATE_HOME/dsh-desktop-rs/restart.log`，宿主没回来时脚本以退出码 3 结束并留下原因。
+桌面壳对「宿主退出」有熔断：连续 2 次起不来会进诊断页，那种情况下先看日志再点「重启本地服务」。
 
 ## 已知问题：菜单/浮层只显示空白框（v0.1.3 已修）
 
