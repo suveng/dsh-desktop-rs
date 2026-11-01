@@ -3,6 +3,7 @@
 [![ci](https://github.com/suveng/dsh-desktop-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/suveng/dsh-desktop-rs/actions/workflows/ci.yml)
 [![release](https://github.com/suveng/dsh-desktop-rs/actions/workflows/release.yml/badge.svg)](https://github.com/suveng/dsh-desktop-rs/actions/workflows/release.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![dsh topic](https://img.shields.io/badge/topic-dsh-3370ff)](https://github.com/topics/dsh)
 
 用 Rust 写的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 桌面客户端，目标平台 **Linux**。
 
