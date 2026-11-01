@@ -33,12 +33,13 @@
 | install.sh 无 root 安装 | ✅ | `PREFIX=/tmp/...` 安装出 bin + desktop + 3 个尺寸图标 + MIME 数据库；二进制可执行 |
 | install.sh 卸载干净 | ✅ | `--uninstall` 后 `find … | grep -i dsh` 为空 |
 | 系统环境已复原 | ✅ | `dpkg -s dsh-desktop` → 未安装；`/usr/bin/dsh-desktop` 不存在 |
+| **干净容器 `dpkg -i`** | ✅ | `podman run ubuntu:24.04`（全新容器）内 `apt-get install ./dsh-desktop_0.1.0_amd64.deb` → `install_exit=0`，`dsh-desktop --version` → `0.1.0`（`RUN_OK`），`/usr/share/applications/dsh-desktop.desktop` 存在 |
 
 **这些都不是「看起来对」**：deb 是真 `dpkg -i` 装进系统、真从 `/usr/bin` 跑的；验证完已经 `dpkg -r` 卸掉，机器状态与开始时一致。
 
 ## 3. 与目标的偏差（见 `architecture.md` ADR-D9）
 
-- **没做「干净容器」**：本机没有容器运行时（`docker`/`podman` 都不存在）。替代做法是**真实安装到当前系统后再卸载**，OS 与依赖都是真的，只是不隔离。这条偏离已按硬规则写成 **ADR-D9**。要复现容器版，用：
+- ~~**没做「干净容器」**~~ → **已补做**（2026-11-01 13:44）：装 podman 后在全新 `ubuntu:24.04` 里 `apt-get install ./deb` 成功。踩到的坑是容器出网：容器直连被 FlClash TUN 拦、换 CN 镜像又因 IPv6 无路由 + 缺 CA 全部 `Ign`，最终用 `-o Acquire::http::Proxy=http://127.0.0.1:7890` 打通（`lists=15`，13 MB/min）。ADR-D9 相应更新为「已解决」。原复现命令：
   ```bash
   docker run --rm -v $PWD/dist:/w ubuntu:24.04 bash -c \
     'apt-get update && apt-get install -y /w/dsh-desktop_0.1.0_amd64.deb && dsh-desktop --version'

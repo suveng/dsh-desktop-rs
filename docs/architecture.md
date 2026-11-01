@@ -146,9 +146,11 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **验收**：`--selftest --simulate-drop <文件>` 输出 `{"tray":true,"hotkeys":true,"notify":true}` 与 `{"hostPath":"/tmp/…"}`；见 `docs/m2-acceptance.md` §4.2。
 
-### D9 干净容器验收降级为「本机安装后卸载」
+### D9 干净容器验收（先降级，后已补做）
 
-**决定**：M3 的「干净容器里 `dpkg -i`」改为「在本机真实 `dpkg -i` → 从 `/usr/bin` 运行验收 → `dpkg -r` 复原」。
+**决定（初版）**：M3 的「干净容器里 `dpkg -i`」改为「在本机真实 `dpkg -i` → 从 `/usr/bin` 运行验收 → `dpkg -r` 复原」。
+
+**更新（2026-11-01 13:44）**：装 `podman` 后已在全新 `ubuntu:24.04` 里完成 `apt-get install ./dsh-desktop_0.1.0_amd64.deb`（`install_exit=0`、`dsh-desktop --version` → `0.1.0`）。原降级不再需要，本条保留为记录：容器出网的三个坑（TUN 拦截直连、容器内 IPv6 无路由、缺 CA 导致 https 全 `Ign`）与解法（apt 显式代理）都在 `docs/m3-acceptance.md §3`。
 
 **理由**：本机没有 `docker`/`podman`，且安装容器运行时会改写宿主机系统（systemd 单元、存储驱动、iptables），代价与风险都超出本次交付范围。替代方案保留了「真实 dpkg 数据库 + 真实依赖解析 + 真实二进制执行」这三件事，唯一缺的是隔离。
 
