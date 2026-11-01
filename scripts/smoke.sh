@@ -44,8 +44,23 @@ scenario_failure_page() {
     echo "--- app 日志 ---"; sed -n '1,20p' "$OUT/failure.log" 2>/dev/null
     fail "没有出现失败页窗口"
   }
-  sleep 1
-  import -window "$win" "$OUT/failure-page.png" || fail "截图失败"
+  # CI 机器慢：页面可能还是白底 about:blank。轮询到「页面已变暗」再截图。
+  local ok=0
+  for _ in $(seq 1 20); do
+    import -window "$win" "$OUT/failure-page.png" 2>/dev/null || true
+    if python3 - "$OUT/failure-page.png" <<'PYEOF'
+import sys
+from PIL import Image, ImageStat
+try:
+    mean = ImageStat.Stat(Image.open(sys.argv[1]).convert("L")).mean[0]
+except Exception:
+    sys.exit(1)
+sys.exit(0 if mean < 90 else 1)
+PYEOF
+    then ok=1; break; fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "失败页在 20 秒内仍是白/空页"
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 
