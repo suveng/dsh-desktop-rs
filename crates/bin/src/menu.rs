@@ -175,15 +175,31 @@ impl MenuBar {
         actions
     }
 
-    /// 生成菜单并挂到 GTK 窗口上。
-    ///
-    /// `container` 传 `window.default_vbox()` —— muda 会在里面插一个 menubar。
-    pub fn install<W, C>(&mut self, window: &W, container: Option<&C>) -> muda::Result<()>
-    where
-        W: gtk::prelude::IsA<gtk::Window> + gtk::prelude::IsA<gtk::Widget>,
-        C: gtk::prelude::IsA<gtk::Widget>,
-    {
-        self.menu.init_for_gtk_window(window, container)
+    /// 把菜单挂到窗口上（三平台各自的入口）。
+    pub fn install(&mut self, window: &tao::window::Window) -> muda::Result<()> {
+        #[cfg(target_os = "linux")]
+        let result = {
+            use tao::platform::unix::WindowExtUnix as _;
+            self.menu
+                .init_for_gtk_window(window.gtk_window(), window.default_vbox())
+        };
+        #[cfg(target_os = "windows")]
+        let result = {
+            use tao::platform::windows::WindowExtWindows as _;
+            // SAFETY: hwnd 由 tao 的窗口持有，生命周期覆盖本调用。
+            unsafe { self.menu.init_for_hwnd(window.hwnd()) }
+        };
+        #[cfg(target_os = "macos")]
+        let result = {
+            let _ = window;
+            self.menu.init_for_nsapp()
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        let result = {
+            let _ = window;
+            Ok(())
+        };
+        result
     }
 }
 

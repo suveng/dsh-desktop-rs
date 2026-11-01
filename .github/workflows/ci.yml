@@ -13,7 +13,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint-and-test:
+  # Linux：完整的 fmt / clippy / test + 真窗口冒烟
+  linux:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -24,11 +25,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            xvfb
+            xvfb xdotool openbox imagemagick python3-pil
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          shared-key: linux
 
       - name: fmt
         run: cargo fmt --all --check
@@ -36,31 +37,32 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # supervisor / platform 的测试不需要窗口；GUI 冒烟测试留给 M2 的 xvfb job。
       - name: test
         run: cargo test --workspace --lib --tests
 
-  smoke:
-    # 真实窗口的冒烟测试：xvfb 里起一个窗口，验证失败页与桌面 shim。
-    runs-on: ubuntu-24.04
+      - name: smoke (失败页视觉基线)
+        run: xvfb-run -a -s "-screen 0 1600x1000x24" bash scripts/smoke.sh
+
+  # macOS / Windows：编译 + 打测试二进制（没有宿主 dsh，跑不了端到端）
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macos-arm64
+          - os: windows-2022
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            xvfb xdotool imagemagick python3-pil
-
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: smoke
+          shared-key: ${{ matrix.name }}
 
       - name: build
-        run: cargo build --workspace
+        run: cargo build --workspace --release
 
-      # 场景 2（真实前端）需要本地 dsh，CI 里没有，所以只跑失败页基线。
-      - name: smoke
-        run: xvfb-run -a -s "-screen 0 1600x1000x24" bash scripts/smoke.sh
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

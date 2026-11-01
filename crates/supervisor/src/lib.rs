@@ -248,7 +248,8 @@ impl Host {
                     if libc::setpgid(0, 0) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    // 壳被 kill -9 时宿主也随之退出，避免孤儿。
+                    // 壳被 kill -9 时宿主也随之退出，避免孤儿（Linux 专有）。
+                    #[cfg(target_os = "linux")]
                     if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }

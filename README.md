@@ -1,5 +1,9 @@
 # dsh-desktop-rs
 
+[![ci](https://github.com/suveng/dsh-desktop-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/suveng/dsh-desktop-rs/actions/workflows/ci.yml)
+[![release](https://github.com/suveng/dsh-desktop-rs/actions/workflows/release.yml/badge.svg)](https://github.com/suveng/dsh-desktop-rs/actions/workflows/release.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 用 Rust 写的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 桌面客户端，目标平台 **Linux**。
 
 - 壳用 `tao` + `wry`（Linux 后端 WebKitGTK），UI 复用 dsh 现有 Web 前端与全部插件生态。
@@ -8,6 +12,16 @@
 
 设计文档：[`docs/architecture.md`](docs/architecture.md) ·
 验收记录：[M0](docs/spike-webkitgtk.md) / [M1](docs/m1-acceptance.md) / [M2](docs/m2-acceptance.md) / [M3](docs/m3-acceptance.md)
+
+## 平台支持
+
+| 平台 | 状态 | 产物 |
+|---|---|---|
+| Linux x86_64 | 完整支持（本机实测） | `.deb` / `.AppImage` / `.tar.gz` |
+| macOS (arm64/x64) | 构建通过 CI，未在真机验收 | `.app`（zip） |
+| Windows x64 | 构建通过 CI，未在真机验收 | `.exe`（zip） |
+
+发布包在 [Releases](https://github.com/suveng/dsh-desktop-rs/releases)（打 `v*` tag 时由 CI 自动构建）。
 
 ## 安装
 

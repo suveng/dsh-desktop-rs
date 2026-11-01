@@ -4,6 +4,7 @@
 //! 提供原生窗口能力、在它挂掉时给出可操作的诊断。UI 与协议都归上游。
 
 mod desktop;
+mod embed;
 mod menu;
 mod update;
 
@@ -16,10 +17,9 @@ use std::time::{Duration, Instant};
 use tao::dpi::{LogicalPosition, LogicalSize};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
-use tao::platform::unix::WindowExtUnix as _;
 use tao::window::WindowBuilder;
 use wry::http::Request;
-use wry::{NewWindowResponse, WebViewBuilder, WebViewBuilderExtUnix as _};
+use wry::{NewWindowResponse, WebViewBuilder};
 
 use dsh_platform::instance::{self, Claim, Command, Instance};
 use dsh_platform::{WindowState, load_window_state, save_window_state, state_dir};
@@ -42,6 +42,7 @@ const MAX_AUTO_RESTARTS: u32 = 2;
 /// SIGTERM / SIGINT / SIGHUP 置位。信号处理器里只允许写这个原子量。
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 extern "C" fn on_signal(_sig: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
@@ -50,6 +51,7 @@ extern "C" fn on_signal(_sig: libc::c_int) {
 ///
 /// 没有它的话，壳被 SIGTERM 打断时 `Drop` 不会跑，宿主就会变成孤儿 ——
 /// 这一点在本机（无窗口管理器）实测过。
+#[cfg(unix)]
 fn install_signal_handlers() {
     // SAFETY: 处理器只做一次原子写入；SA_RESTART 避免打断 GTK 的 syscall。
     unsafe {
@@ -326,10 +328,16 @@ fn which(program: &str) -> Option<PathBuf> {
 }
 
 fn is_executable(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    #[cfg(not(unix))]
+    let result = path.is_file();
+    result
 }
 
 // ---------------------------------------------------------------- 无窗口探针
@@ -449,6 +457,9 @@ fn wipe_webview_storage() {
     let _ = std::fs::remove_dir_all(webview_home());
 }
 
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
+
 fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let spec = launch_spec(&cli);
 
@@ -479,7 +490,7 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     }
 
     let mut menubar = menu::build();
-    if let Err(err) = menubar.install(window.gtk_window(), window.default_vbox()) {
+    if let Err(err) = menubar.install(&window) {
         eprintln!("dsh-desktop: 安装原生菜单失败：{err}");
     }
 
@@ -488,8 +499,7 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let drops: Arc<desktop::DropPaths> = Arc::new(desktop::DropPaths::new());
     let drops_sink = Arc::clone(&drops);
 
-    let vbox = window.default_vbox().expect("tao 的 default_vbox 缺失");
-    let webview = WebViewBuilder::new()
+    let builder = WebViewBuilder::new()
         .with_html(SKELETON)
         .with_initialization_script(SHIM)
         // 返回 false：保留 DOM 默认的 drop 行为（前端要靠它拿到 File），
@@ -516,7 +526,7 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
                 || url.starts_with("about:")
                 || url.starts_with("data:");
             if !internal {
-                spawn_detached("xdg-open", &[url.as_str()]);
+                open_external(&url);
             }
             internal
         })
@@ -524,11 +534,10 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
             if url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost") {
                 return NewWindowResponse::Allow;
             }
-            spawn_detached("xdg-open", &[url.as_str()]);
+            open_external(&url);
             NewWindowResponse::Deny
-        })
-        .build_gtk(vbox)
-        .expect("创建 webview 失败");
+        });
+    let webview = embed::build(builder, &window);
 
     let mut app = App {
         host: None,
@@ -798,7 +807,7 @@ impl App {
                 "open-logs" => {
                     let dir = state_dir();
                     let _ = std::fs::create_dir_all(&dir);
-                    spawn_detached("xdg-open", &[&dir.display().to_string()]);
+                    open_external(&dir.display().to_string());
                 }
                 "quit" => {
                     self.persist_window_state(window);
@@ -892,18 +901,12 @@ impl App {
         );
     }
 
-    fn show_message(&self, window: &tao::window::Window, title: &str, body: &str) {
-        use gtk::prelude::{DialogExt as _, GtkWindowExt as _, ObjectExt as _};
-        let dialog = gtk::MessageDialog::new(
-            Some(window.gtk_window()),
-            gtk::DialogFlags::MODAL,
-            gtk::MessageType::Info,
-            gtk::ButtonsType::Close,
-            title,
-        );
-        dialog.set_property("secondary-text", body);
-        dialog.run();
-        dialog.close();
+    fn show_message(&self, _window: &tao::window::Window, title: &str, body: &str) {
+        rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(body)
+            .set_level(rfd::MessageLevel::Info)
+            .show();
     }
 
     /// 处理来自 `assets/shim.js` 的请求。
@@ -1277,25 +1280,16 @@ impl App {
         spawn_detached("xdg-open", &[&dir.display().to_string()]);
     }
 
-    fn show_about(&self, window: &tao::window::Window) {
-        use gtk::prelude::{DialogExt as _, GtkWindowExt as _, ObjectExt as _};
-        let dialog = gtk::MessageDialog::new(
-            Some(window.gtk_window()),
-            gtk::DialogFlags::MODAL,
-            gtk::MessageType::Info,
-            gtk::ButtonsType::Close,
-            "dsh-desktop",
-        );
-        dialog.set_property(
-            "secondary-text",
-            format!(
-                "版本 {}\nDeepSeek Harness 的 Linux 桌面壳。\n界面与协议归上游，壳只负责窗口、进程与桌面集成。\n\n快捷键\n{}",
+    fn show_about(&self, _window: &tao::window::Window) {
+        rfd::MessageDialog::new()
+            .set_title("dsh-desktop")
+            .set_description(format!(
+                "版本 {}\n\nDeepSeek Harness 的桌面壳。界面与协议归上游，壳只负责窗口、进程与桌面集成。\n\n快捷键\n{}",
                 env!("CARGO_PKG_VERSION"),
                 self.menubar.shortcuts_help()
-            ),
-        );
-        dialog.run();
-        dialog.close();
+            ))
+            .set_level(rfd::MessageLevel::Info)
+            .show();
     }
 
     fn fail(&mut self, window: &tao::window::Window, summary: &str, detail: &str) {
@@ -1409,25 +1403,24 @@ fn device_info() -> String {
     )
 }
 
-/// 原生目录选择。用 GTK 的对话框：它已经是依赖，且和 webview 同一个 toolkit。
+/// 原生目录选择（rfd：Linux 走 xdg-portal / GTK，macOS/Windows 走各自原生对话框）。
 fn pick_directory() -> Option<String> {
-    use gtk::prelude::{DialogExt as _, FileChooserExt as _, GtkWindowExt as _};
+    rfd::FileDialog::new()
+        .set_title("选择工作区目录")
+        .pick_folder()
+        .map(|path| path.display().to_string())
+}
 
-    let dialog = gtk::FileChooserDialog::new(
-        Some("选择工作区目录"),
-        None::<&gtk::Window>,
-        gtk::FileChooserAction::SelectFolder,
-    );
-    dialog.add_button("取消", gtk::ResponseType::Cancel);
-    dialog.add_button("选择", gtk::ResponseType::Accept);
-    let response = dialog.run();
-    let path = if response == gtk::ResponseType::Accept {
-        dialog.filename().map(|p| p.display().to_string())
-    } else {
-        None
-    };
-    dialog.close();
-    path
+/// 用系统默认程序打开外链（跨平台）。
+fn open_external(url: &str) {
+    #[cfg(target_os = "linux")]
+    spawn_detached("xdg-open", &[url]);
+    #[cfg(target_os = "macos")]
+    spawn_detached("open", &[url]);
+    #[cfg(target_os = "windows")]
+    spawn_detached("cmd", &["/C", "start", "", url]);
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    let _ = url;
 }
 
 fn spawn_detached(program: &str, args: &[&str]) {
