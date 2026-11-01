@@ -10,9 +10,12 @@ license = "MIT"
 repository = "https://github.com/suveng/dsh-desktop-rs"
 
 [workspace.dependencies]
-dsh-desktop = { path = "crates/bin", package = "dsh-desktop" }
-dsh-platform = { path = "crates/platform" }
-dsh-supervisor = { path = "crates/supervisor" }
+# 补 version 是为了满足 cargo-deny 的 [bans] wildcards = "deny"：
+# 只有 path、没有 version 的依赖会被判成 wildcard，CI 的 license/advisory 检查会失败。
+# version 必须与 [workspace.package] 的 version 保持一致。
+dsh-desktop = { path = "crates/bin", package = "dsh-desktop", version = "0.1.3" }
+dsh-platform = { path = "crates/platform", version = "0.1.3" }
+dsh-supervisor = { path = "crates/supervisor", version = "0.1.3" }
 
 [profile.dev.package."*"]
 # GUI 依赖在 dev 下也要优化，否则启动明显发卡（desigma 的同款取舍）。
