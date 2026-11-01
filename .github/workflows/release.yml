@@ -53,7 +53,7 @@ jobs:
         with: { shared-key: release-linux }
       - name: Package (deb / AppImage / tar.gz)
         run: bash scripts/package.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/*
@@ -77,7 +77,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: bash packaging/macos/bundle.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/*
@@ -115,7 +115,7 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath "dist\dsh-desktop-$version-windows-x64.zip" -Force
           Get-ChildItem dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*
