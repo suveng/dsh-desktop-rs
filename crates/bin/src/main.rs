@@ -844,12 +844,9 @@ impl App {
         }
     }
 
-    /// 首屏加载后把 `?token=` 从地址里去掉（WebKit 的 Referer 也就干净了）。
-    fn strip_token_from_location(&mut self) {
-        self.webview
-            .evaluate_script("history.replaceState(null, '', '/');")
-            .ok();
-    }
+    // 曾经的 `history.replaceState(null,'','/')` 已移除：它会把文档 URL 改成不带 token 的根地址，
+    // 之后任何依赖 URL 鉴权的取数都会掉 303（正是「菜单只画框不画字」的早期怀疑对象之一）。
+    // token 不落盘由 isolate_webview_storage() + 退出清理保证，不需要再动页面 URL。
 
     fn start_update_check(&mut self) {
         let Some(feed) = self.update_feed.clone() else {
