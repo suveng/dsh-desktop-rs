@@ -488,6 +488,8 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
 
     let ipc: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let ipc_sink = Arc::clone(&ipc);
+    let doc_title: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let doc_title_sink = Arc::clone(&doc_title);
     let drops: Arc<desktop::DropPaths> = Arc::new(desktop::DropPaths::new());
     let drops_sink = Arc::clone(&drops);
 
@@ -495,6 +497,12 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let webview = WebViewBuilder::new()
         .with_html(SKELETON)
         .with_initialization_script(SHIM)
+        // WebKit 改了 document.title 不会自动反映到窗口标题，自检要靠它把结果带出来。
+        .with_document_title_changed_handler(move |title| {
+            if let Ok(mut slot) = doc_title_sink.lock() {
+                *slot = title;
+            }
+        })
         // 返回 false：保留 DOM 默认的 drop 行为（前端要靠它拿到 File），
         // 我们只是顺手记下原生路径，供 `__DSH_HOST_PATHS__.pathFor()` 查。
         .with_drag_drop_handler(move |event| {
@@ -546,6 +554,7 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
         selftest_chat: cli.selftest_chat,
+        doc_title: Arc::clone(&doc_title),
         restart_started: None,
         deep_link_ticks: 0,
         simulate_drop: cli.simulate_drop.clone(),
@@ -622,6 +631,7 @@ struct App {
     pending_js: Arc<Mutex<Vec<String>>>,
     /// `--selftest-chat`：在壳内发一条消息并等回复。
     selftest_chat: bool,
+    doc_title: Arc<Mutex<String>>,
     /// 重启分段计时的起点（宿主退出被检测到的时刻）。
     restart_started: Option<Instant>,
     /// 深链落地后等待页面稳定的计数。
@@ -693,6 +703,12 @@ impl App {
         self.drain_desktop(window);
         self.settle_deep_link();
         self.drive_chat_selftest();
+        if self.selftest_chat {
+            let title = self.doc_title.lock().map(|t| t.clone()).unwrap_or_default();
+            if title.starts_with("CHAT_") {
+                window.set_title(&title);
+            }
+        }
 
         if let Some(at) = self.restart_at
             && Instant::now() >= at
@@ -1152,6 +1168,7 @@ impl App {
         }
         match self.tick_count {
             45 => {
+                eprintln!("dsh-desktop: 自检开始发送消息");
                 self.webview
                     .evaluate_script(
                         "(function(){var ce=document.querySelector('[contenteditable=\"true\"]');\
@@ -1162,9 +1179,14 @@ impl App {
                     )
                     .ok();
             }
-            150 => self.probe_script(
-                "JSON.stringify({ chat: (document.body.innerText || '').indexOf('OK') >= 0 })",
-            ),
+            150 => {
+                // 结果写进窗口标题，由外部脚本轮询读取 —— 不依赖 evaluate 回调。
+                self.webview
+                    .evaluate_script(
+                        "document.title = ((document.body.innerText || '').indexOf('OK') >= 0) ? 'CHAT_OK' : 'CHAT_FAIL';",
+                    )
+                    .ok();
+            }
             _ => {}
         }
     }

@@ -98,6 +98,12 @@ xvfb-run -a bash scripts/smoke.sh         # 冒烟：失败页像素基线（+ �
 scripts/package.sh                        # 出 tar.gz / deb / AppImage 到 dist/
 ```
 
+## 已知限制
+
+- **壳内对话未自动化验证**：`--selftest-chat` 目前不可靠（JS 输入/标题回传链路在 wry 里没走通），M1 的「能正常对话」证据来自 M0 的同一 WebKitGTK 运行时探针。
+- **深链目标无路由时是空页**：`dsh://x/y` → `<origin>/x/y`，上游没有该路由时不会回退到根页面（只做了空页探测的数据采集）。
+- **干净容器安装未验证**：本机无 docker/podman，降级为「本机 `dpkg -i` → 验收 → `dpkg -r`」，见 `docs/architecture.md` ADR-D9。
+
 ## 目录
 
 ```
