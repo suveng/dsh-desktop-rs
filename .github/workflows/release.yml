@@ -101,40 +101,8 @@ jobs:
           New-Item -ItemType Directory -Force dist, target\wix | Out-Null
           Copy-Item target\release\dsh-desktop.exe target\wix\
           Copy-Item LICENSE target\wix\
-
-          @"
-          <?xml version="1.0" encoding="UTF-8"?>
-          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-            <Product Id="*" Name="DeepSeek Harness" Language="1033" Version="$version"
-                     Manufacturer="dsh-desktop contributors" UpgradeCode="7E1B4C62-3C1F-4B8E-9F21-0C5C9B7A2F11">
-              <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"/>
-              <MajorUpgrade DowngradeErrorMessage="A newer version is already installed. Please uninstall it first." />
-              <MediaTemplate EmbedCab="yes"/>
-              <Directory Id="TARGETDIR" Name="SourceDir">
-                <Directory Id="ProgramFiles64Folder">
-                  <Directory Id="INSTALLFOLDER" Name="DeepSeek Harness">
-                    <Component Id="MainExecutable" Guid="3F7A2C41-8B2E-4D2A-9C3B-11A2B3C4D5E6" Win64="yes">
-                      <File Id="DshDesktopExe" Source="target\wix\dsh-desktop.exe" KeyPath="yes">
-                        <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuDir"
-                                  Name="DeepSeek Harness" WorkingDirectory="INSTALLFOLDER"
-                                  Icon="AppIcon"/>
-                      </File>
-                      <File Id="LicenseFile" Source="target\wix\LICENSE"/>
-                      <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall"/>
-                    </Component>
-                  </Directory>
-                </Directory>
-                <Directory Id="ProgramMenuFolder" Name="Programs">
-                  <Directory Id="ProgramMenuDir" Name="DeepSeek Harness"/>
-                </Directory>
-              </Directory>
-              <Icon Id="AppIcon" SourceFile="packaging\linux\icons\dsh-desktop-256.png"/>
-              <Feature Id="Main" Title="DeepSeek Harness" Level="1">
-                <ComponentRef Id="MainExecutable"/>
-              </Feature>
-            </Product>
-          </Wix>
-          "@ | Set-Content -Encoding UTF8 target\wix\product.wxs
+          (Get-Content packaging\windows\product.wxs.in -Raw).Replace('@VERSION@', $version) |
+            Set-Content -Encoding UTF8 target\wix\product.wxs
 
           candle.exe -out target\wix\product.wixobj target\wix\product.wxs
           light.exe -out "dist\dsh-desktop-$version-windows-x64.msi" target\wix\product.wixobj

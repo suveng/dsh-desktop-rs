@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v3 定义。由 .github/workflows/release.yml 替换 @VERSION@ 后编译成 .msi。
+  几个容易踩的点（都已按 WiX 的 ICE 规则处理）：
+    - Package 必须声明 Platform="x64"，否则 64 位组件触发 ICE80
+    - 主程序组件放 ProgramFiles64Folder，且不能含任何 per-user 元素（ICE57）
+    - 开始菜单快捷方式单独成一个组件，用 HKCU 注册表项做 KeyPath，并声明 RemoveFolder（ICE57/64）
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="DeepSeek Harness" Language="1033" Version="@VERSION@"
+           Manufacturer="dsh-desktop contributors"
+           UpgradeCode="7E1B4C62-3C1F-4B8E-9F21-0C5C9B7A2F11">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"/>
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed. Please uninstall it first." />
+    <MediaTemplate EmbedCab="yes"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="DeepSeek Harness">
+          <Component Id="MainExecutable" Guid="3F7A2C41-8B2E-4D2A-9C3B-11A2B3C4D5E6" Win64="yes">
+            <File Id="DshDesktopExe" Source="target\wix\dsh-desktop.exe" KeyPath="yes"/>
+            <File Id="LicenseFile" Source="target\wix\LICENSE"/>
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ProgramMenuDir" Name="DeepSeek Harness">
+          <!-- per-user 目录 + per-user KeyPath，和快捷方式同域，满足 ICE57 -->
+          <Component Id="StartMenuShortcut" Guid="9B2E5A71-4C6D-4F3A-8E21-7D4C6B9A1F33" Win64="yes">
+            <Shortcut Id="StartMenuLink"
+                      Name="DeepSeek Harness"
+                      Description="DeepSeek Harness desktop shell"
+                      Target="[INSTALLFOLDER]dsh-desktop.exe"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="AppIcon"/>
+            <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall"/>
+            <RegistryValue Root="HKCU" Key="Software\suveng\dsh-desktop"
+                           Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Icon Id="AppIcon" SourceFile="packaging\linux\icons\dsh-desktop-256.png"/>
+
+    <Feature Id="Main" Title="DeepSeek Harness" Level="1">
+      <ComponentRef Id="MainExecutable"/>
+      <ComponentRef Id="StartMenuShortcut"/>
+    </Feature>
+  </Product>
+</Wix>
