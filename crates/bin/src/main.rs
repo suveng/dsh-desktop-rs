@@ -113,8 +113,6 @@ struct Cli {
     simulate_drop: Vec<String>,
     /// 更新源（JSON：`{"version","url"}`）。缺省时不做任何网络请求。
     update_feed: Option<String>,
-    /// 有窗口：在壳内发一条消息并等回复（M1「能正常对话」）。
-    selftest_chat: bool,
     /// 无窗口：只查一次更新并打印 JSON。
     check_update: bool,
     version: bool,
@@ -135,7 +133,6 @@ impl Cli {
   --simulate-drop <path>  自检用：假装拖入一个路径（可重复），验证真实路径回填
   --update-feed <url>     更新源（JSON：{version,url}）；默认读 DSH_DESKTOP_UPDATE_FEED
   --check-update          无窗口：查一次更新并打印 JSON
-  --selftest-chat         有窗口：在壳内发一条消息并等回复（含 --selftest 的全部检查）
   -V, --version           打印版本
   -h, --help              打印本帮助
 
@@ -155,7 +152,6 @@ impl Cli {
             update_feed: std::env::var("DSH_DESKTOP_UPDATE_FEED")
                 .ok()
                 .filter(|v| !v.is_empty()),
-            selftest_chat: false,
             check_update: false,
             version: false,
             help: false,
@@ -183,10 +179,6 @@ impl Cli {
                 "--selftest" => cli.selftest = true,
                 "--simulate-drop" => cli.simulate_drop.push(value(&mut it, "--simulate-drop")?),
                 "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
-                "--selftest-chat" => {
-                    cli.selftest = true;
-                    cli.selftest_chat = true;
-                }
                 "--check-update" => cli.check_update = true,
                 "-V" | "--version" => cli.version = true,
                 "-h" | "--help" => cli.help = true,
@@ -488,8 +480,6 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
 
     let ipc: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let ipc_sink = Arc::clone(&ipc);
-    let doc_title: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let doc_title_sink = Arc::clone(&doc_title);
     let drops: Arc<desktop::DropPaths> = Arc::new(desktop::DropPaths::new());
     let drops_sink = Arc::clone(&drops);
 
@@ -497,12 +487,6 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let webview = WebViewBuilder::new()
         .with_html(SKELETON)
         .with_initialization_script(SHIM)
-        // WebKit 改了 document.title 不会自动反映到窗口标题，自检要靠它把结果带出来。
-        .with_document_title_changed_handler(move |title| {
-            if let Ok(mut slot) = doc_title_sink.lock() {
-                *slot = title;
-            }
-        })
         // 返回 false：保留 DOM 默认的 drop 行为（前端要靠它拿到 File），
         // 我们只是顺手记下原生路径，供 `__DSH_HOST_PATHS__.pathFor()` 查。
         .with_drag_drop_handler(move |event| {
@@ -553,8 +537,6 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         restart_at: None,
         open_url: cli.open_url.clone(),
         pending_js: Arc::new(Mutex::new(Vec::new())),
-        selftest_chat: cli.selftest_chat,
-        doc_title: Arc::clone(&doc_title),
         restart_started: None,
         deep_link_ticks: 0,
         simulate_drop: cli.simulate_drop.clone(),
@@ -629,9 +611,6 @@ struct App {
     open_url: Option<String>,
     /// host → 页面 的回填脚本，在 tick 里统一 evaluate。
     pending_js: Arc<Mutex<Vec<String>>>,
-    /// `--selftest-chat`：在壳内发一条消息并等回复。
-    selftest_chat: bool,
-    doc_title: Arc<Mutex<String>>,
     /// 重启分段计时的起点（宿主退出被检测到的时刻）。
     restart_started: Option<Instant>,
     /// 深链落地后等待页面稳定的计数。
@@ -702,13 +681,6 @@ impl App {
         self.drain_commands(window);
         self.drain_desktop(window);
         self.settle_deep_link();
-        self.drive_chat_selftest();
-        if self.selftest_chat {
-            let title = self.doc_title.lock().map(|t| t.clone()).unwrap_or_default();
-            if title.starts_with("CHAT_") {
-                window.set_title(&title);
-            }
-        }
 
         if let Some(at) = self.restart_at
             && Instant::now() >= at
@@ -1104,9 +1076,7 @@ impl App {
         let has_device = state.results.iter().any(|row| row.contains("\"device\""));
         let has_host_path = self.simulate_drop.is_empty()
             || state.results.iter().any(|row| row.contains("\"hostPath\""));
-        let chat_done =
-            !self.selftest_chat || state.results.iter().any(|row| row.contains("\"chat\""));
-        if !has_device || !has_host_path || !chat_done {
+        if !has_device || !has_host_path {
             return;
         }
         let output = state.results.join(" ");
@@ -1158,36 +1128,6 @@ impl App {
             self.probe_script(
                 "JSON.stringify({ deepLinkBody: (document.body.innerText || '').trim().length })",
             );
-        }
-    }
-
-    /// 壳内对话自检：先输入并回车，再检查页面上有没有回复。
-    fn drive_chat_selftest(&mut self) {
-        if !self.selftest_chat || !self.ready {
-            return;
-        }
-        match self.tick_count {
-            45 => {
-                eprintln!("dsh-desktop: 自检开始发送消息");
-                self.webview
-                    .evaluate_script(
-                        "(function(){var ce=document.querySelector('[contenteditable=\"true\"]');\
-                         if(!ce)return;ce.focus();document.execCommand('insertText',false,'Reply with exactly: OK');\
-                         var b=Array.prototype.slice.call(document.querySelectorAll('button')).filter(function(x){\
-                           return /发送消息|^Send$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim());})[0];\
-                         if(b)b.click();})()",
-                    )
-                    .ok();
-            }
-            150 => {
-                // 结果写进窗口标题，由外部脚本轮询读取 —— 不依赖 evaluate 回调。
-                self.webview
-                    .evaluate_script(
-                        "document.title = ((document.body.innerText || '').indexOf('OK') >= 0) ? 'CHAT_OK' : 'CHAT_FAIL';",
-                    )
-                    .ok();
-            }
-            _ => {}
         }
     }
 

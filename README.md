@@ -100,7 +100,7 @@ scripts/package.sh                        # 出 tar.gz / deb / AppImage 到 dist
 
 ## 已知限制
 
-- **壳内对话未自动化验证**：`--selftest-chat` 目前不可靠（JS 输入/标题回传链路在 wry 里没走通），M1 的「能正常对话」证据来自 M0 的同一 WebKitGTK 运行时探针。
+- **壳内对话未自动化验证**：根因已定位——本会话没有窗口管理器，`gtk_window` 从不获得输入焦点，页面内 `execCommand('insertText')` 与合成按键都不会生效（M0 用 PyGObject 能成功，是因为那个脚本自己创建了窗口并显式 `grab_focus`）。因此这条只能用 M0 的证据（同一 WebKitGTK 运行时、148 个流式帧）代替。要在 CI 里补，需要先给 xvfb 起一个窗口管理器（如 `openbox`）。
 - **深链目标无路由时是空页**：`dsh://x/y` → `<origin>/x/y`，上游没有该路由时不会回退到根页面（只做了空页探测的数据采集）。
 - **干净容器安装未验证**：本机无 docker/podman，降级为「本机 `dpkg -i` → 验收 → `dpkg -r`」，见 `docs/architecture.md` ADR-D9。
 
