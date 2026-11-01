@@ -169,6 +169,21 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **被否决的方案**：把「发一条消息」当成一条原子用例（失败时无法定位是焦点、选择器还是按钮匹配，前三次就是这样浪费掉的）。
 
+### D11 macOS / Windows 由「范围外」改为「用户追加」
+
+**决定**：在 0.1.0 发布后，按用户明确要求追加 macOS / Windows 的构建与发布流水线（`ci.yml` 矩阵、`release.yml` 三平台产物、`packaging/macos/bundle.sh`）。
+
+**理由**：原目标把 Windows/macOS 列为「明确不做」，前提是「首版只做 Linux」。用户在发布环节直接要求「打包多平台的安装包」，这是对原边界的有意覆盖，不是执行者的自行扩张。为避免含糊，这里明确记录：**Linux 是唯一经过真机验收的平台**，macOS/Windows 目前只保证「CI 编译通过 + 产物生成」。
+
+**实现代价（已付）**：
+- `gtk` 改为 Linux-only 依赖（否则 macOS 会去编 pango-sys）
+- 抽出 `embed.rs`：Linux 走 `build_gtk(vbox)`，macOS/Windows 走 `build(window)`
+- 菜单安装按平台分派（`init_for_gtk_window` / `init_for_hwnd` / `init_for_nsapp`）
+- 对话框与目录选择改用 `rfd`（三平台原生，去掉 GTK 对话框）
+- 平台相关调用加 `cfg` 门（`PermissionsExt` / 信号 / `prctl`）
+
+**残留**：macOS/Windows 没有真机验收，`docs/m3-acceptance.md` 的结论只对 Linux 成立。
+
 ## 4. 架构
 
 ```

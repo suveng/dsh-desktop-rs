@@ -1000,13 +1000,11 @@ impl App {
             if script.contains("__dshShimResolve(") {
                 eprintln!("dsh-desktop: shim 回填 {script}");
             }
-            if let Some(value) = script.strip_prefix("__DIAG__") {
-                eprintln!("dsh-desktop: [diag] {value}");
-                continue;
-            }
             if let Some(value) = script.strip_prefix("__SELFTEST__") {
-                if let Some(state) = self.selftest.as_mut() {
-                    state.results.push(value.to_owned());
+                match self.selftest.as_mut() {
+                    Some(state) => state.results.push(value.to_owned()),
+                    // 非自检模式（如 --selftest-chat）下，同样的探针输出转成诊断日志。
+                    None => eprintln!("dsh-desktop: [diag] {value}"),
                 }
                 continue;
             }
@@ -1081,7 +1079,7 @@ impl App {
         self.webview
             .evaluate_script_with_callback(script, move |value| {
                 if let Ok(mut queue) = pending.lock() {
-                    queue.push(format!("__DIAG__{value}"));
+                    queue.push(format!("__SELFTEST__{value}"));
                 }
             })
             .ok();
@@ -1093,6 +1091,14 @@ impl App {
         };
         // 必须真的等到 deviceInfo 往返的结果（自检的第一条是版本区间，不算数）。
         let has_device = state.results.iter().any(|row| row.contains("\"device\""));
+        // deviceInfo 走 IPC 回填，可能早于页面内的 shim 探测；两者都到齐才算完成。
+        let has_shim = state
+            .results
+            .iter()
+            .any(|row| row.contains("protocolVersion"));
+        if !has_shim {
+            return;
+        }
         let has_host_path = self.simulate_drop.is_empty()
             || state.results.iter().any(|row| row.contains("\"hostPath\""));
         if !has_device || !has_host_path {
@@ -1234,8 +1240,16 @@ impl App {
         for command in received {
             match command {
                 Command::Focus => {
+                    // 最小化状态下 set_focus 不会把窗口拉回来，先解除最小化。
+                    window.set_minimized(false);
                     window.set_visible(true);
                     window.set_focus();
+                    #[cfg(target_os = "linux")]
+                    {
+                        use gtk::prelude::GtkWindowExt as _;
+                        use tao::platform::unix::WindowExtUnix as _;
+                        window.gtk_window().present();
+                    }
                 }
                 Command::OpenUrl(url) => {
                     self.open_url = Some(url);

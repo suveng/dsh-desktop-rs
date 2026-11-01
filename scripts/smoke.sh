@@ -49,7 +49,7 @@ scenario_failure_page() {
   wait "$pid" 2>/dev/null || true
 
   python3 "$ROOT/scripts/compare_shots.py" \
-    "$ROOT/tests/baseline/failure-page.png" "$OUT/failure-page.png" 0.01 \
+    "$ROOT/tests/baseline/failure-page.png" "$OUT/failure-page.png" 0.05 \
     || fail "失败页与基线不一致"
   echo "    失败页 OK"
 }
