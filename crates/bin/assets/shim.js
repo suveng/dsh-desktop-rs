@@ -72,19 +72,16 @@
 
   const fileFromDataUrl = function (html) {
     if (!html || html.indexOf('data:image/') === -1) return null;
+    // 不用 DOMParser：HTML 片段里可能夹带完整文档结构，正则足够认出一个 data URL。
+    const match = /src\s*=\s*["'](data:image\/([a-z0-9.+-]+);base64,[^"']+)["']/i.exec(html);
+    if (!match) return null;
     try {
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const image = doc.querySelector('img[src^="data:image/"]');
-      if (!image) return null;
-      const src = image.getAttribute('src') || '';
-      const comma = src.indexOf(',');
-      if (comma === -1) return null;
-      const type = (src.slice(5, comma).split(';')[0] || 'image/png').toLowerCase();
-      const binary = atob(src.slice(comma + 1));
+      const type = 'image/' + match[2].toLowerCase();
+      const binary = atob(match[1].slice(match[1].indexOf(',') + 1));
       const bytes = new Uint8Array(binary.length);
       for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      return new File([bytes], 'pasted-' + stamp + '.' + (type.split('/')[1] || 'png'), { type: type });
+      return new File([bytes], 'pasted-' + stamp + '.' + match[2].toLowerCase(), { type: type });
     } catch (_error) {
       return null;
     }
