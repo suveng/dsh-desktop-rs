@@ -50,6 +50,81 @@
 
   const picker = { pick: () => call('pick-directory') };
 
+  /*
+   * 截图粘贴。WebKitGTK 直到 2.54.1 才允许粘贴内存中的图片（webkit bug 218519），
+   * Ubuntu 24.04 的 2.52 里 paste 事件的 clipboardData 根本没有图片项。两条路：
+   *   ① HTML 片段里带 data:image/ 的图（WebKit ≥2.54 与 Chromium 都是这样）→ 本地解码成 File；
+   *   ② 剪贴板只有位图、没有文本 → 请壳读位图并送回页面。
+   * 两者都收敛到同一次「合成 drop」：前端只需要它本来就有的 drop 处理。
+   */
+  const dropFile = function (file) {
+    try {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      const target = document.querySelector('[contenteditable="true"]') || document.body;
+      const event = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer });
+      (target || document).dispatchEvent(event);
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  };
+
+  const fileFromDataUrl = function (html) {
+    if (!html || html.indexOf('data:image/') === -1) return null;
+    try {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const image = doc.querySelector('img[src^="data:image/"]');
+      if (!image) return null;
+      const src = image.getAttribute('src') || '';
+      const comma = src.indexOf(',');
+      if (comma === -1) return null;
+      const type = (src.slice(5, comma).split(';')[0] || 'image/png').toLowerCase();
+      const binary = atob(src.slice(comma + 1));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      return new File([bytes], 'pasted-' + stamp + '.' + (type.split('/')[1] || 'png'), { type: type });
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  // 壳会自己判断「有没有图片、有没有文本」；纯文本粘贴时它什么都不做。
+  const askClipboardImage = function () {
+    call('clipboard-image').catch(noop);
+  };
+
+  document.addEventListener('paste', function (event) {
+    const data = event.clipboardData;
+    if (!data) return;
+    const items = data.items || [];
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      // 前端能自己收下的（真文件、真位图）就不要插手。
+      if (item.kind === 'file' && item.getAsFile && item.getAsFile()) return;
+    }
+    let html = '';
+    let text = '';
+    try { html = data.getData('text/html') || ''; } catch (_error) { html = ''; }
+    try { text = data.getData('text/plain') || ''; } catch (_error) { text = ''; }
+    const file = fileFromDataUrl(html);
+    if (file) {
+      event.preventDefault();
+      event.stopPropagation();
+      dropFile(file);
+      return;
+    }
+    if (text === '' && html === '') askClipboardImage();
+  }, true);
+
+  // 有的 WebKitGTK 版本对「只有位图」的剪贴板连 paste 事件都不发，用按键兜底。
+  document.addEventListener('keydown', function (event) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    if (event.key !== 'v' && event.key !== 'V') return;
+    askClipboardImage();
+  }, true);
+
   // 危险点：前端插件以「protocolVersion === 1」判定桌面形态，然后**直接调用**这些成员。
   // 少一个方法就会让插件在 activate 阶段抛错，整个 web boot 失败。
   // 所以这里必须给出完整形状，不支持的能力用「安全空实现 + 明确拒绝」表达。

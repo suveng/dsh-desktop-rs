@@ -16,6 +16,8 @@ pub enum Action {
     Reload,
     OpenLogs,
     Quit,
+    /// 把剪贴板里的截图当附件送进页面（WebKitGTK < 2.54 的粘贴事件没有图片数据）。
+    PasteScreenshot,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -32,6 +34,7 @@ impl Action {
             Self::Reload => "reload",
             Self::OpenLogs => "open-logs",
             Self::Quit => "quit",
+            Self::PasteScreenshot => "paste-screenshot",
             Self::ZoomIn => "zoom-in",
             Self::ZoomOut => "zoom-out",
             Self::ZoomReset => "zoom-reset",
@@ -85,6 +88,15 @@ fn bindings() -> Vec<(&'static str, Vec<Binding>)> {
                     "Ctrl+Q",
                 ),
             ],
+        ),
+        (
+            "编辑",
+            vec![b(
+                Action::PasteScreenshot,
+                "粘贴截图（剪贴板图片）",
+                Some(accel(M::CONTROL | M::SHIFT, C::KeyV)),
+                "Ctrl+Shift+V",
+            )],
         ),
         (
             "视图",
@@ -222,15 +234,16 @@ pub fn build() -> MenuBar {
             by_id.insert(item.id().clone(), binding.action);
             submenu.append(&item).expect("追加菜单项");
         }
+        // 编辑菜单里 GTK 预定义项跟在自定义项后面：复制/粘贴/全选交给聚焦的控件，
+        // 不跨进程复制文本。
+        if title == "编辑" {
+            submenu.append(&PredefinedMenuItem::separator()).ok();
+            submenu.append(&PredefinedMenuItem::copy(None)).ok();
+            submenu.append(&PredefinedMenuItem::paste(None)).ok();
+            submenu.append(&PredefinedMenuItem::select_all(None)).ok();
+        }
         menu.append(&submenu).expect("追加子菜单");
     }
-
-    // Edit 菜单用 GTK 预定义项：复制/粘贴/全选交给聚焦的控件，不跨进程复制文本。
-    let edit = Submenu::new("编辑", true);
-    edit.append(&PredefinedMenuItem::copy(None)).ok();
-    edit.append(&PredefinedMenuItem::paste(None)).ok();
-    edit.append(&PredefinedMenuItem::select_all(None)).ok();
-    menu.insert(&edit, 1).ok();
 
     MenuBar {
         menu,
