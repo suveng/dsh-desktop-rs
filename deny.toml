@@ -7,6 +7,16 @@ yanked = "warn"
 version = 2
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0", "CC0-1.0", "0BSD"]
 
+# arboard 在 Windows 上走 clipboard-win，它和它的 error-code 都是 BSL-1.0（Boost，OSI 认可，
+# 跟 MIT 一样宽松）。只在 Windows 目标上编译，所以按 crate 精确放行，不把 BSL-1.0 塞进全局白名单。
+[[licenses.exceptions]]
+name = "clipboard-win"
+allow = ["BSL-1.0"]
+
+[[licenses.exceptions]]
+name = "error-code"
+allow = ["BSL-1.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

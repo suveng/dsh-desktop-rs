@@ -3,6 +3,7 @@
 //! 壳只做四件事（`docs/architecture.md` D1）：拉起宿主进程、开一个 webview 加载它、
 //! 提供原生窗口能力、在它挂掉时给出可操作的诊断。UI 与协议都归上游。
 
+mod clipboard;
 mod desktop;
 mod embed;
 mod menu;
@@ -920,6 +921,8 @@ impl App {
                     self.shutdown();
                     std::process::exit(0);
                 }
+                // 页面侧粘贴到「没有文件也没有文本」的剪贴板时，请壳把位图送进来。
+                "clipboard-image" => self.deliver_clipboard_image(),
                 other if other.starts_with('{') => self.handle_shim(other),
                 other => eprintln!("dsh-desktop: 未知的界面指令 {other:?}"),
             }
@@ -1084,6 +1087,10 @@ impl App {
                 {
                     state.results.push(data.to_string());
                 }
+                self.resolve(id, true, &serde_json::Value::Null);
+            }
+            "clipboard-image" => {
+                self.deliver_clipboard_image();
                 self.resolve(id, true, &serde_json::Value::Null);
             }
             "pick-directory" => match pick_directory() {
@@ -1367,6 +1374,7 @@ impl App {
                     }
                 }
                 menu::Action::OpenLogs => self.open_logs(),
+                menu::Action::PasteScreenshot => self.deliver_clipboard_image(),
                 menu::Action::Quit => {
                     self.persist_window_state(window);
                     self.shutdown();
@@ -1388,6 +1396,31 @@ impl App {
                 menu::Action::CheckUpdate => self.check_update_now(window),
             }
         }
+    }
+
+    /// 把剪贴板里的截图当附件送进页面。
+    ///
+    /// 三段式：`arboard` 读位图 → 编成 PNG → 分块注入一段脚本合成 `drop`。
+    /// 走 drop 是因为 `DragEvent` 允许自带 `dataTransfer`，而 `ClipboardEvent` 的
+    /// `clipboardData` 由浏览器持有（见 `clipboard.rs` 头部的 WebKit bug）。
+    fn deliver_clipboard_image(&mut self) {
+        let Some(png) = clipboard::read_png() else {
+            eprintln!("dsh-desktop: 剪贴板里没有可粘贴的图片（只有文本或根本是空的）");
+            return;
+        };
+        if clipboard::was_just_delivered(&png) {
+            return;
+        }
+        for script in clipboard::paste_scripts(&png) {
+            if let Err(err) = self.webview.evaluate_script(&script) {
+                eprintln!("dsh-desktop: 注入剪贴板图片失败：{err}");
+                return;
+            }
+        }
+        eprintln!(
+            "dsh-desktop: 已把剪贴板图片（{} KiB）交给页面",
+            png.len() / 1024
+        );
     }
 
     fn drain_commands(&mut self, window: &tao::window::Window) {

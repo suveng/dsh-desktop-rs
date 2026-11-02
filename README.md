@@ -87,6 +87,7 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 | 系统通知 | 宿主退出、自动重启、有新版本时发通知；没有通知服务时只记日志 |
 | 全局热键 | `Ctrl+Alt+D` 唤回窗口 |
 | 拖文件进窗口 | 取真实路径，前端按 `@path` 引用而不是上传字节 |
+| 粘贴截图 | `Ctrl+V` 或「编辑 → 粘贴截图（`Ctrl+Shift+V`）」：壳读剪贴板位图、编成 PNG，再合成一次 drop 交给输入框；只接管「剪贴板里没有文本」的情形 |
 | 更新提示 | `--update-feed <url>` 或 `DSH_DESKTOP_UPDATE_FEED`；源返回 `{"version","url"}`，有新版就在「帮助 → 检查更新」里提示并打开下载页 |
 | 重启本地服务（不关窗口） | `scripts/restart-host.sh`（`--delay N` 延迟 N 秒、`--dry-run` 只看计划）；结束宿主后由 supervisor 立刻拉起新的，窗口自动导航到新端口 |
 
@@ -121,6 +122,19 @@ scripts/restart-host.sh --dry-run  # 只打印计划
 `DSH_DESKTOP_KEEP_MENU_ANIMATION=1`。
 
 完整记录（含五个被证伪的假设）见 [`docs/known-issues.md`](docs/known-issues.md)。
+
+## 为什么粘贴截图要绕一层
+
+WebKitGTK 直到 **2.54.1** 才允许应用粘贴内存中的图片数据（[webkit bug 218519](https://bugs.webkit.org/show_bug.cgi?id=218519)），
+Ubuntu 24.04 提供的是 2.52：`paste` 事件的 `clipboardData` 里只有文本，前端拿不到图片，粘贴静默失败。
+macOS 走 WKWebView 的 pasteboard，图片以文件形式出现，所以同一个前端在 mac 上正常。
+
+壳的补救（`crates/bin/src/clipboard.rs` + `crates/bin/assets/shim.js`）：
+
+1. `Ctrl+V`/`Ctrl+Shift+V` → shim 判断这次粘贴有没有可收的文件；没有就请壳读剪贴板位图。
+2. 壳用 `arboard` 取图 → `png` 编码 → base64 分块注入 → 页面用 `File` + `DataTransfer` 合成一次 `drop`。
+   走 `drop` 而不是 `paste`，是因为 `DragEvent` 允许自带 `dataTransfer`，`ClipboardEvent` 不允许。
+3. 剪贴板里同时有文本时不接管（那是正常复制文字）；同一张图在 800ms 内只送一次（paste 与 keydown 两条路径会各问一次）。
 
 ## 从源码构建
 
