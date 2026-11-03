@@ -13,6 +13,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// 托盘菜单项 id（与 `menu::Action` 分开：托盘只暴露三个动作）。
 pub const TRAY_SHOW: &str = "tray-show";
+pub const TRAY_ONBOARD: &str = "tray-onboard";
 pub const TRAY_RELOAD: &str = "tray-reload";
 pub const TRAY_QUIT: &str = "tray-quit";
 
@@ -62,6 +63,7 @@ impl Tray {
         let menu = Menu::new();
         for (id, label) in [
             (TRAY_SHOW, "显示窗口"),
+            (TRAY_ONBOARD, "安装引导 / 环境管理…"),
             (TRAY_RELOAD, "重新加载界面"),
             (TRAY_QUIT, "退出"),
         ] {

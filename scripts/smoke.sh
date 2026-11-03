@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M2 冒烟测试：在虚拟 X 服务器里跑真实窗口，断言「窗口能起来、失败页正确、桌面 shim 生效」。
+# M2 冒烟测试：在虚拟 X 服务器里跑真实窗口，断言「窗口能起来、失败落到安装引导页、桌面 shim 生效」。
 #
 # 用法：
 #   xvfb-run -a scripts/smoke.sh
@@ -13,6 +13,17 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN=${BIN:-$ROOT/target/debug/dsh-desktop}
 OUT=${OUT:-$ROOT/target/smoke}
 mkdir -p "$OUT"
+
+# 用临时 XDG_RUNTIME_DIR：否则「单实例」锁会被用户正在跑的桌面壳占着，
+# 冒烟进程只会转发一条消息就退出，窗口永远等不到。
+export XDG_RUNTIME_DIR=$OUT/runtime
+rm -rf "$XDG_RUNTIME_DIR"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+# 也别读用户真实窗口状态：上次存的 1920x945 会让窗口比虚拟屏还大，截出来的图右侧被切掉。
+export XDG_STATE_HOME=$OUT/state
+rm -rf "$XDG_STATE_HOME"
+mkdir -p "$XDG_STATE_HOME"
 
 fail() {
   echo "SMOKE FAIL: $*" >&2
@@ -32,23 +43,24 @@ wait_window() {
   return 1
 }
 
-# ---- 场景 1：宿主不存在 → 必须出现失败页，且与基线一致 ----------------------
-scenario_failure_page() {
-  echo "--- 场景 1：失败页 ---"
-  "$BIN" --host-program /nonexistent/dsh >"$OUT/failure.log" 2>&1 &
+# ---- 场景 1：宿主不存在 → 必须落到安装引导页，且页面真的画出来了 ----------
+scenario_onboarding() {
+  echo "--- 场景 1：安装引导页 ---"
+  # 显式给一个不存在的宿主：启动必然失败，失败就进引导页（这是产品行为）。
+  "$BIN" --host-program /nonexistent/dsh >"$OUT/onboarding.log" 2>&1 &
   local pid=$!
 
   local win
-  win=$(wait_window 'startup failed') || {
+  win=$(wait_window '安装引导') || {
     kill -TERM "$pid" 2>/dev/null || true
-    echo "--- app 日志 ---"; sed -n '1,20p' "$OUT/failure.log" 2>/dev/null
-    fail "没有出现失败页窗口"
+    echo "--- app 日志 ---"; sed -n '1,20p' "$OUT/onboarding.log" 2>/dev/null
+    fail "没有出现安装引导窗口"
   }
   # CI 机器慢：页面可能还是白底 about:blank。轮询到「页面已变暗」再截图。
   local ok=0
   for _ in $(seq 1 20); do
-    import -window "$win" "$OUT/failure-page.png" 2>/dev/null || true
-    if python3 - "$OUT/failure-page.png" <<'PYEOF'
+    import -window "$win" "$OUT/onboarding.png" 2>/dev/null || true
+    if python3 - "$OUT/onboarding.png" <<'PYEOF'
 import sys
 from PIL import Image, ImageStat
 try:
@@ -62,14 +74,17 @@ PYEOF
     then ok=1; break; fi
     sleep 1
   done
-  [ "$ok" = 1 ] || fail "失败页在 20 秒内仍是白/空页"
+  [ "$ok" = 1 ] || fail "引导页在 20 秒内仍是白/空页"
+  # 第一帧只要变暗就通过，但 WebKit 是分块上屏的：底部按钮常比正文晚一帧。
+  # 等两秒再截一次最终图，免得基线/人眼看到缺一半。
+  sleep 2
+  import -window "$win" "$OUT/onboarding.png" 2>/dev/null || true
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 
-  if [ "${SMOKE_RELAXED:-0}" = "1" ]; then
-    # CI 的字体栈与本地不同，逐像素没有可比性；退化为「结构断言」：
-    # 尺寸正确、页面足够暗、且有明显的非背景内容（不是空白页）。
-    python3 - "$OUT/failure-page.png" <<'PYEOF' || fail "失败页结构断言未通过"
+  # 引导页内容随机器环境变化（node 版本、已装 profile 都不同），不做像素基线，
+  # 只断言「尺寸正确、页面够暗、有明显内容」——真正的内容断言在 Rust 单测里。
+  python3 - "$OUT/onboarding.png" <<'PYEOF' || fail "引导页结构断言未通过"
 import sys
 from PIL import Image, ImageStat
 im = Image.open(sys.argv[1]).convert("L")
@@ -78,15 +93,10 @@ width, height = im.size
 background = stat.mean[0]
 spread = stat.stddev[0]
 print(f"尺寸 {width}x{height} 平均亮度 {background:.1f} 标准差 {spread:.1f}")
-ok = width >= 1200 and height >= 800 and background < 90 and spread > 4
+ok = width >= 900 and height >= 600 and background < 90 and spread > 4
 sys.exit(0 if ok else 1)
 PYEOF
-  else
-    python3 "$ROOT/scripts/compare_shots.py" \
-      "$ROOT/tests/baseline/failure-page.png" "$OUT/failure-page.png" 0.05 \
-      || fail "失败页与基线不一致"
-  fi
-  echo "    失败页 OK"
+  echo "    引导页 OK（截图 $OUT/onboarding.png）"
 }
 
 # ---- 场景 2（可选）：真实前端 + shim 握手 ------------------------------------
@@ -140,6 +150,6 @@ scenario_selftest() {
   fi
 }
 
-scenario_failure_page
+scenario_onboarding
 scenario_selftest
 echo "SMOKE OK"

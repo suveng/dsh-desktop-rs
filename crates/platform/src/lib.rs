@@ -6,6 +6,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 pub mod instance;
 
@@ -13,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 /// 应用名，用作目录名与桌面文件名。
 pub const APP_ID: &str = "dsh-desktop-rs";
+
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// `$XDG_STATE_HOME/dsh-desktop-rs`，回退到 `~/.local/state/dsh-desktop-rs`。
 #[must_use]
@@ -27,6 +30,30 @@ pub fn runtime_dir() -> PathBuf {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(APP_ID),
         _ => state_dir().join("run"),
     }
+}
+
+/// `$XDG_DATA_HOME/dsh-desktop-rs`，回退到 `~/.local/share/dsh-desktop-rs`。
+///
+/// 安装出来的 node 运行时与 dsh 放这里：它们是「数据」而不是「状态」，
+/// 删掉状态目录（窗口状态、配置）不该把装好的运行时一起带走。
+///
+/// **第一次调用时的值会被记住**（见 [`pin_paths`]）：webview 隔离会把
+/// `XDG_DATA_HOME` 指到 tmpfs，之后再来算就会把 node / dsh 装进一重启就没的目录。
+#[must_use]
+pub fn data_dir() -> PathBuf {
+    pinned(&DATA_DIR, "XDG_DATA_HOME", ".local/share")
+}
+
+/// 启动最早期调一次，把数据目录钉在「用户真正的主目录」上。
+///
+/// 顺序很重要：必须在 `isolate_webview_storage()`（改 `XDG_DATA_HOME`）之前。
+pub fn pin_paths() {
+    let _ = data_dir();
+}
+
+fn pinned(cell: &'static OnceLock<PathBuf>, var: &str, fallback: &str) -> PathBuf {
+    cell.get_or_init(|| base_dir(var, fallback).join(APP_ID))
+        .clone()
 }
 
 /// `$XDG_CACHE_HOME/dsh-desktop-rs`，回退到 `~/.cache/dsh-desktop-rs`。
@@ -122,6 +149,20 @@ fn set_private(_path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_dir_ignores_later_env_changes() {
+        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let var = "DSH_TEST_XDG_DATA";
+        // SAFETY: 这个变量名只在本测试里用，且是进程内唯一读写者。
+        unsafe { std::env::set_var(var, "/first/data") };
+        let first = super::pinned(&DIR, var, ".local/share");
+        assert!(first.starts_with("/first/data"));
+        unsafe { std::env::set_var(var, "/second/data") };
+        let again = super::pinned(&DIR, var, ".local/share");
+        assert_eq!(first, again, "钉住之后不该跟着环境变量漂");
+        unsafe { std::env::remove_var(var) };
+    }
+
     use super::*;
 
     #[test]

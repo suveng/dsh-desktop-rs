@@ -13,6 +13,8 @@ use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 /// 壳自己处理的命令。界面内部的快捷键不经过这里。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// 安装引导 / 环境管理：装 node、装/更新/回退 dsh、选 profile、备份还原。
+    Onboard,
     Reload,
     OpenLogs,
     Quit,
@@ -31,6 +33,7 @@ impl Action {
     #[must_use]
     pub fn id(self) -> &'static str {
         match self {
+            Self::Onboard => "onboard",
             Self::Reload => "reload",
             Self::OpenLogs => "open-logs",
             Self::Quit => "quit",
@@ -74,6 +77,12 @@ fn bindings() -> Vec<(&'static str, Vec<Binding>)> {
         (
             "文件",
             vec![
+                b(
+                    Action::Onboard,
+                    "安装引导 / 环境管理…",
+                    Some(accel(M::CONTROL | M::SHIFT, C::KeyI)),
+                    "Ctrl+Shift+I",
+                ),
                 b(
                     Action::Reload,
                     "重新加载界面",
@@ -249,5 +258,48 @@ pub fn build() -> MenuBar {
         menu,
         by_accel,
         by_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_bindings() -> Vec<Binding> {
+        bindings()
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .collect()
+    }
+
+    /// 环境必须有个日常入口——不能只有「宿主挂了」才进得去引导页。
+    #[test]
+    fn the_wizard_has_a_menu_entry() {
+        let entry = all_bindings()
+            .into_iter()
+            .find(|binding| binding.action == Action::Onboard)
+            .expect("「安装引导 / 环境管理」必须在菜单里");
+        assert!(entry.label.contains("安装引导"));
+        assert!(entry.accel.is_some(), "菜单项要能被快捷键唤起");
+    }
+
+    #[test]
+    fn ids_and_hotkeys_are_unique() {
+        let all = all_bindings();
+        let mut ids: Vec<&str> = all.iter().map(|binding| binding.action.id()).collect();
+        ids.sort_unstable();
+        let total = ids.len();
+        ids.dedup();
+        assert_eq!(total, ids.len(), "菜单 id 不能重复");
+
+        let mut hints: Vec<&str> = all
+            .iter()
+            .map(|binding| binding.hint)
+            .filter(|hint| !hint.is_empty())
+            .collect();
+        hints.sort_unstable();
+        let total = hints.len();
+        hints.dedup();
+        assert_eq!(total, hints.len(), "快捷键不能重复");
     }
 }

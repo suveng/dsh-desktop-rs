@@ -2,4 +2,5 @@
 /dist
 *.png
 !/docs/spike/*.png
+!/docs/shots/*.png
 !/packaging/linux/icons/*.png

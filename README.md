@@ -11,7 +11,7 @@
 - Rust 只负责：宿主进程监督、窗口、原生菜单、单实例、深链、窗口状态、崩溃自愈。
 - 不实现 dsh 的 RPC 协议，也不 fork dsh。
 
-设计文档：[`docs/architecture.md`](docs/architecture.md) ·
+设计文档：[`docs/architecture.md`](docs/architecture.md) · 安装引导：[`docs/onboarding.md`](docs/onboarding.md) ·
 验收记录：[M0](docs/spike-webkitgtk.md) / [M1](docs/m1-acceptance.md) / [M2](docs/m2-acceptance.md) / [M3](docs/m3-acceptance.md)
 
 ## 平台支持
@@ -81,9 +81,10 @@ chmod +x dsh-desktop-0.1.0-x86_64.AppImage
 | 启动 | 应用菜单 / `dsh-desktop` |
 | 第二次启动 | 只把已有窗口提到前面，不会再起一个宿主 |
 | 打开 `dsh://` 链接 | `xdg-open dsh://session/abc` → 转发给运行中的实例，导航到 `<origin>/session/abc` |
-| 菜单 | 文件（重新加载 / 打开日志目录 / 退出）、编辑、视图（缩放 / 全屏）、窗口、帮助（含由快捷键表生成的清单） |
-| 宿主崩溃 | 立即重启（第一次不退避，之后 1s）；连续 2 次起不来则显示诊断页 |
-| 托盘 | 有 `StatusNotifierWatcher` 时提供：显示窗口 / 重新加载 / 退出；GNOME 需 AppIndicator 扩展 |
+| 菜单 | 文件（安装引导 / 环境管理… / 重新加载 / 打开日志目录 / 退出）、编辑、视图（缩放 / 全屏）、窗口、帮助（含由快捷键表生成的清单） |
+| 装 node / dsh、换版本、选 profile、备份还原 | 「文件 → 安装引导 / 环境管理…」（`Ctrl+Shift+I`）或托盘同名项；环境不全或宿主起不来时也会自动进入。打开后停在概览页，点「启动」回主界面（不会自动重启宿主），细节见 `docs/onboarding.md` |
+| 宿主崩溃 | 立即重启（第一次不退避，之后 1s）；连续 2 次起不来则进安装引导页（带诊断日志） |
+| 托盘 | 有 `StatusNotifierWatcher` 时提供：显示窗口 / 安装引导 / 重新加载 / 退出；GNOME 需 AppIndicator 扩展 |
 | 系统通知 | 宿主退出、自动重启、有新版本时发通知；没有通知服务时只记日志 |
 | 全局热键 | `Ctrl+Alt+D` 唤回窗口 |
 | 拖文件进窗口 | 取真实路径，前端按 `@path` 引用而不是上传字节 |
@@ -105,7 +106,7 @@ scripts/restart-host.sh --dry-run  # 只打印计划
 
 脚本只结束宿主进程（`node …/bin.js --profile web`），不动桌面壳与窗口；每一步都追加到
 `$XDG_STATE_HOME/dsh-desktop-rs/restart.log`，宿主没回来时脚本以退出码 3 结束并留下原因。
-桌面壳对「宿主退出」有熔断：连续 2 次起不来会进诊断页，那种情况下先看日志再点「重启本地服务」。
+桌面壳对「宿主退出」有熔断：连续 2 次起不来会进安装引导页，那种情况下先看日志面板再点「重试」。
 
 ## 已知问题：菜单/浮层只显示空白框（v0.1.3 已修）
 
@@ -154,7 +155,8 @@ cargo test --workspace                # supervisor / platform 全部无窗口可
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 ./target/debug/dsh-desktop --probe ...    # 只验证能拿到就绪 URL（不打印 token）
 ./target/debug/dsh-desktop --selftest ... # 有窗口自检：桌面 shim + deviceInfo 往返
-xvfb-run -a bash scripts/smoke.sh         # 冒烟：失败页像素基线（+ 可选真实前端）
+./target/debug/dsh-desktop --onboard-selftest  # 无窗口跑一遍安装引导（装 node / dsh / 复检），看新机能不能自洽
+xvfb-run -a bash scripts/smoke.sh         # 冒烟：失败路由 → 安装引导页（+ 可选真实前端）
 scripts/package.sh                        # 出 tar.gz / deb / AppImage 到 dist/
 ```
 
@@ -174,10 +176,11 @@ scripts/package.sh                        # 出 tar.gz / deb / AppImage 到 dist
 
 ```
 crates/
-  bin/          tao + wry 窗口、菜单、骨架页/失败页、信号处理、shim 回环
+  bin/          tao + wry 窗口、菜单、骨架页/安装引导页、信号处理、shim 回环
+  setup/        安装引导的纯逻辑：环境探测、node 下载、npm 安装、profile 备份
   supervisor/   宿主进程：spawn、就绪行解析、进程组关闭、退出码上报
   platform/     XDG 路径、窗口状态、单实例（loopback + 0600 发现文件）
 packaging/linux/  .desktop、MIME xml、图标、install.sh
 scripts/          package.sh、smoke.sh、compare_shots.py、gen_icons.py
-docs/             architecture.md + M0–M3 验收记录
+docs/             architecture.md、onboarding.md + M0–M3 验收记录
 ```
