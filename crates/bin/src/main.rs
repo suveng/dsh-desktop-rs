@@ -429,10 +429,12 @@ fn launch_spec(cli: &Cli, settings: &Settings) -> LaunchSpec {
     if let Some(cwd) = &cli.host_cwd {
         spec = spec.cwd(cwd);
     }
-    // 引导装出来的 node / dsh 不在系统 PATH 里，得显式垫到子进程 PATH 前面，
-    // 否则 `#!/usr/bin/env node` 的 shim 会找不到解释器。
+    // 宿主拿到的 PATH 要能同时看见：用户自己配的目录、引导装出来的 node / dsh、
+    // 以及登录 shell 里的 nvm / homebrew —— 否则 `#!/usr/bin/env node` 的 shim
+    // 找不到解释器，插件管理里的 `pnpm view` 直接 ENOENT。
     let paths = onboard::Paths::from_platform();
-    let mut bins: Vec<PathBuf> = Vec::new();
+    let home = dsh_platform::home_dir();
+    let mut bins: Vec<PathBuf> = settings.extra_path_dirs(&home);
     if !settings.node_version.is_empty() {
         let dir = node::bin_dir(&paths.data, &settings.node_version);
         if dir.is_dir() {
@@ -443,8 +445,13 @@ fn launch_spec(cli: &Cli, settings: &Settings) -> LaunchSpec {
     if user_bin.is_dir() {
         bins.push(user_bin);
     }
-    if !bins.is_empty() {
-        spec = spec.env("PATH", envcheck::path_with(&bins).to_string_lossy());
+    let base = dsh_setup::shellenv::detected_path(&home);
+    spec = spec.env(
+        "PATH",
+        dsh_setup::shellenv::compose_path(&bins, Some(base.as_os_str())).to_string_lossy(),
+    );
+    for (key, value) in settings.host_env() {
+        spec = spec.env(key, value);
     }
     spec
 }

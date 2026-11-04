@@ -1026,6 +1026,28 @@ impl Onboard {
         if object.contains_key("profile") {
             self.settings.profile = text(object.get("profile"));
         }
+        if object.contains_key("extra_path") {
+            self.settings.extra_path = text(object.get("extra_path"))
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        if object.contains_key("env") {
+            self.settings.env = text(object.get("env"))
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        return None;
+                    }
+                    let (key, value) = line.split_once('=')?;
+                    let key = key.trim();
+                    (!key.is_empty()).then(|| (key.to_owned(), value.trim().to_owned()))
+                })
+                .collect();
+        }
         self.dirty = true;
         // 刻意不动 `rev`：设置是用户边打字边存的，整块重画会把输入焦点抢走。
     }
@@ -1156,6 +1178,13 @@ impl Onboard {
                     InstallScope::User => "user",
                 },
                 "profile": self.settings.target_profile(),
+                "host_env": {
+                    "extra_path": self.settings.extra_path.join("\n"),
+                    "env": self.settings.env.iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                },
             },
             "versions": self.versions,
             "history": self.settings.history.iter().map(|entry| json!({

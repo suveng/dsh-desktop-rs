@@ -69,7 +69,9 @@ fn base_dir(var: &str, fallback: &str) -> PathBuf {
     }
 }
 
-fn home_dir() -> PathBuf {
+/// 用户主目录：`$HOME`，取不到时退回当前目录。
+#[must_use]
+pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 

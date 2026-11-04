@@ -8,6 +8,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 支持区间下界（与 `docs/architecture.md` D7 一致）。
 pub const MIN_HOST_VERSION: &str = "0.2.2-alpha.2";
@@ -121,6 +122,10 @@ pub struct Settings {
     pub profile: String,
     /// 已成功安装过的版本，最新的在前。
     pub history: Vec<InstalledVersion>,
+    /// 额外注入宿主 `PATH` 的目录，支持 `~`。排在自动探测的目录之后。
+    pub extra_path: Vec<String>,
+    /// 额外注入宿主的环境变量（`KEY` → `VALUE`），同名项覆盖进程环境。
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -133,6 +138,8 @@ impl Default for Settings {
             install_scope: InstallScope::default(),
             profile: DEFAULT_PROFILE.to_owned(),
             history: Vec::new(),
+            extra_path: Vec::new(),
+            env: BTreeMap::new(),
         }
     }
 }
@@ -156,6 +163,30 @@ impl Settings {
         } else {
             &self.profile
         }
+    }
+
+    /// 宿主进程要带的环境变量：用户在设置里填的那些。
+    #[must_use]
+    pub fn host_env(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    /// `extra_path` 展开 `~` 后的目录列表（空串与空白项丢弃）。
+    #[must_use]
+    pub fn extra_path_dirs(&self, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+        self.extra_path
+            .iter()
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| match entry.strip_prefix("~/") {
+                Some(rest) => home.join(rest),
+                None if entry == "~" => home.to_path_buf(),
+                None => std::path::PathBuf::from(entry),
+            })
+            .collect()
     }
 
     /// 安装子进程要带的环境变量：代理 + registry。
@@ -266,6 +297,48 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_env_defaults_are_empty() {
+        let settings = Settings::default();
+        assert!(settings.extra_path.is_empty());
+        assert!(settings.env.is_empty());
+        assert!(settings.host_env().is_empty());
+    }
+
+    #[test]
+    fn extra_path_dirs_expand_tilde_and_skip_blanks() {
+        let home = PathBuf::from("/Users/example");
+        let mut settings = Settings::default();
+        settings.extra_path = vec![
+            "  ".to_owned(),
+            "~/bin".to_owned(),
+            "~".to_owned(),
+            "/opt/tool/bin".to_owned(),
+        ];
+        assert_eq!(
+            settings.extra_path_dirs(&home),
+            vec![
+                PathBuf::from("/Users/example/bin"),
+                PathBuf::from("/Users/example"),
+                PathBuf::from("/opt/tool/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_env_round_trips_through_json() {
+        let mut settings = Settings::default();
+        settings.extra_path = vec!["~/bin".to_owned()];
+        settings.env.insert("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned());
+        let text = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, settings);
+        assert_eq!(
+            back.host_env(),
+            vec![("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned())]
+        );
+    }
 
     fn tempdir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

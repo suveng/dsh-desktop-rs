@@ -8,6 +8,7 @@ pub mod install;
 pub mod node;
 pub mod profiles;
 pub mod settings;
+pub mod shellenv;
 pub mod stamp;
 pub mod version;
 
