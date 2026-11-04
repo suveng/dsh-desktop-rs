@@ -6,6 +6,7 @@
 mod clipboard;
 mod desktop;
 mod embed;
+mod hostscan;
 mod menu;
 mod onboard;
 mod update;
@@ -140,9 +141,65 @@ fn install_signal_handlers() {
     }
 }
 
+/// 把 stderr 接到状态目录里的日志文件。
+///
+/// 从启动台 / 访达启动的 GUI 进程没有终端，`eprintln!` 全泺进虚空；unified log 也抳不到
+/// （`log show --predicate 'process == "dsh-desktop"'` 里一行都没有）。出了问题就只能猜。
+/// 这里把 fd 2 直接指向 `state_dir()/dsh-desktop.log`，所有 `eprintln!` 就自动落盘，
+/// 而且「打开日志目录」按钮正好打开的就是这个目录。
+#[cfg(unix)]
+fn redirect_stderr_to_log() -> Option<std::path::PathBuf> {
+    use std::os::fd::AsRawFd;
+
+    let dir = dsh_platform::state_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("dsh-desktop.log");
+    // 超过 2 MiB 就轮转一份，避免长期开机启动把盘写满。
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 2 * 1024 * 1024) {
+        let _ = std::fs::rename(&path, dir.join("dsh-desktop.log.1"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    // SAFETY: 启动阶段、还没创建 webview 和子进程；`dup2` 之后 `file` 可以关，fd 2 独立有效。
+    unsafe {
+        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
+    }
+    Some(path)
+}
+
+/// `MM-DD HH:MM:SS`，给日志做会话分隔用。
+#[cfg(unix)]
+fn stamp() -> String {
+    // SAFETY: `time`/`localtime_r` 都只写我们传进去的 `tm`。
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        format!(
+            "{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+}
+
 fn main() {
     // webview 隔离会把 XDG_DATA_HOME 指到 tmpfs，先把「装 node / dsh 的目录」钉死。
     dsh_platform::pin_paths();
+    // 早于任何其它输出去接日志文件，否则第一批诊断行会丢。
+    #[cfg(unix)]
+    if std::env::var_os("DSH_DESKTOP_NO_LOG_FILE").is_none()
+        && let Some(path) = redirect_stderr_to_log()
+    {
+        eprintln!("dsh-desktop: ==== 会话 {} ====", stamp());
+        eprintln!("dsh-desktop: 日志文件 {}", path.display());
+    }
     // WebKitGTK 的 DMA-BUF 渲染器在部分驱动上会让 backdrop-filter 浮层的**内容**不绘制：
     // 只看到模糊底、看不到菜单文字（dsh 的菜单表面用 backdrop-filter）。
     // 壳默认关掉它；用户显式设置过就尊重用户。
@@ -150,6 +207,19 @@ fn main() {
         // SAFETY: 创建 webview 之前、单线程启动阶段设置。
         unsafe {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
+    // 从 Dock / Finder 启动时 PATH 只有 /usr/bin:/bin，nvm 装的 node / npm 不在里面：
+    // 环境探测会误报「node 未安装」。把登录 shell 的 PATH 回写进进程，下游（检测、
+    // npm、安装子进程）就都看得到。
+    if std::env::var_os(dsh_setup::shellenv::DISABLE_VAR).is_none() {
+        let home = dsh_platform::home_dir();
+        let path = dsh_setup::shellenv::detected_path(&home);
+        if !path.is_empty() {
+            // SAFETY: 单线程启动阶段，还没有任何子进程 / webview 在读环境。
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
         }
     }
     let cli = match Cli::parse(std::env::args().skip(1)) {
@@ -541,6 +611,7 @@ fn run_onboard_selftest(cli: &Cli) -> i32 {
     let mut onboard = onboard::Onboard::new(onboard::Paths::from_platform(), settings, &candidates);
     onboard.open(&candidates, None);
     println!("ONBOARD ENV {}", onboard.view()["env"]);
+    println!("ONBOARD HOSTS {}", onboard.view()["hosts"]);
     if !onboard.env_ready() {
         onboard.handle(
             &serde_json::json!({"kind": "onboard", "cmd": "install"}),
@@ -589,7 +660,11 @@ fn run_window(cli: Cli) -> i32 {
 
     // D5：单实例先于一切。第二个进程只负责把请求转过去，然后退出。
     let instance = match Instance::claim() {
-        Ok(Claim::Primary(instance)) => instance,
+        Ok(Claim::Primary(instance)) => {
+            // 拿到锁才清：此时上一轮壳已经不在了，留下的宿主一定是孤儿。
+            reap_leftover_host();
+            instance
+        }
         Ok(Claim::Secondary) => {
             let command = cli
                 .open_url
@@ -615,11 +690,56 @@ fn webview_home() -> std::path::PathBuf {
     dsh_platform::runtime_dir().join("webview")
 }
 
+/// 上一个壳留下的宿主进程记录。
+fn host_pid_file() -> std::path::PathBuf {
+    dsh_platform::runtime_dir().join("host.pid")
+}
+
+/// 杀掉上一个壳遗留的宿主。
+///
+/// 壳被 ⌘Q / SIGKILL / 崩溃带走时（macOS 没有 Linux 的 `PR_SET_PDEATHSIG`），宿主会变成
+/// 孤儿进程继续占着端口和实例锁，下次启动就是“双开”。拿到单实例锁时不可能还有别的壳
+/// 活着，所以这里可以直接清掉。
+#[cfg(unix)]
+fn reap_leftover_host() {
+    let path = host_pid_file();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(pid) = text.trim().parse::<i32>() else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    if pid <= 1 || pid == std::process::id() as i32 {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    // `Host::spawn` 用 `setpgid` 把宿主放进独立进程组，组号就是 pid。
+    // SAFETY: `kill` 只传信号，不解引用任何指针。
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if alive {
+        eprintln!("dsh-desktop: 清理上次退出遗留的宿主进程组 {pid}");
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+        }
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(not(unix))]
+fn reap_leftover_host() {}
+
 /// R4：带 token 的 URL 不能**落盘**。
 ///
 /// WebKit 会把子资源连同带 `?token=` 的 Referer 写进磁盘缓存，日志脱敏救不了它。
 /// 做法是把 XDG 缓存/数据目录指到 `$XDG_RUNTIME_DIR`（tmpfs），并在启动与退出时各清一次。
 fn isolate_webview_storage() -> std::path::PathBuf {
+    clear_stale_auth_cookies();
     let home = webview_home();
     let _ = std::fs::create_dir_all(&home);
     #[cfg(unix)]
@@ -650,6 +770,40 @@ fn isolate_webview_storage() -> std::path::PathBuf {
     }
     home
 }
+
+/// 应用自身的 bundle id（与 `packaging/macos/bundle.sh` 的 `CFBundleIdentifier` 一致）。
+const BUNDLE_ID: &str = "dev.suveng.dsh-desktop";
+
+/// macOS 的 WKWebView 不受 XDG 隔离：cookie 落在
+/// `~/Library/HTTPStorages/<bundle-id>.binarycookies`。
+///
+/// 而 dsh 每次握手都会 `set-cookie` 一个**随机命名**的 `dsh-auth-<32>`（Max-Age 30 天），
+/// 旧名字永远不会被覆盖。攒到 70 多个以后 `Cookie:` 请求头超过 node 的 16KB 上限，
+/// 服务端只回 `431 Request Header Fields Too Large`（空 body）→ 页面白屏（0.1.6 的事故）。
+/// 壳启动时（创建 webview 之前）删掉这份 cookie 库：本次会话会重新种一个，够用。
+#[cfg(target_os = "macos")]
+fn clear_stale_auth_cookies() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let dir = home.join("Library/HTTPStorages");
+    // 第二个是 0.1.5 之前改名前的老 bundle id，留着同样是坑。
+    for name in [
+        format!("{BUNDLE_ID}.binarycookies"),
+        "dsh-desktop.binarycookies".to_owned(),
+    ] {
+        let path = dir.join(name);
+        if path.exists() && std::fs::remove_file(&path).is_ok() {
+            eprintln!(
+                "dsh-desktop: 已清理历史 WebKit cookie 库 {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clear_stale_auth_cookies() {}
 
 fn wipe_webview_storage() {
     let _ = std::fs::remove_dir_all(webview_home());
@@ -802,6 +956,10 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         onboard_rev: 0,
         onboard_log: 0,
         onboard_needs_push: false,
+        onboard_acked: false,
+        onboard_tries: 0,
+        onboard_reloads: 0,
+        onboarding: false,
     };
     if let Some(instance) = &app.instance {
         app.commands = Some(instance.commands());
@@ -824,6 +982,14 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + TICK);
+        // ⌘Q / 程序塰退出 / 系统注销走的是 AppKit 的 terminate:，不会过 `CloseRequested`。
+        // 不在这里收尾，宿主就会变成孤儿继续跑，下次启动就成了双开。
+        if let Event::LoopDestroyed = event {
+            app.persist_window_state(&window);
+            app.shutdown();
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
         if let Event::WindowEvent {
             event: WindowEvent::CloseRequested,
             ..
@@ -838,6 +1004,15 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
             app.persist_window_state(&window);
             app.shutdown();
             std::process::exit(0);
+        }
+        // 「点几下只有一下生效」时，第一步要弄清窗口当时是不是 key window：
+        // 非 key 窗口的第一次点击只会激活窗口，不会送进页面。
+        if let Event::WindowEvent {
+            event: WindowEvent::Focused(focused),
+            ..
+        } = event
+        {
+            eprintln!("dsh-desktop: 窗口焦点 {focused}");
         }
         app.tick(&window);
     });
@@ -908,6 +1083,15 @@ struct App {
     onboard_log: usize,
     /// 页面刚加载或刚处理完命令：下一帧强制推一次快照。
     onboard_needs_push: bool,
+    /// 页面脚本回报过「就位」。冷启动时 WebKit 起进程要几百毫秒，第一帧的快照会打在空白文档上
+    /// （`window.__onboard &&` 守卫静默成功），没这个握手页面就会一直空着。
+    onboard_acked: bool,
+    /// 未握手期间已经补推过几次（等太久就别一直重推）。
+    onboard_tries: u8,
+    /// 引导页文档重载过几次（脚本没跑起来时自愈用，别无限重试）。
+    onboard_reloads: u8,
+    /// 当前 webview 里是引导页 / 报错页（而不是宿主页面）。
+    onboarding: bool,
 }
 
 impl App {
@@ -943,15 +1127,22 @@ impl App {
         self.spec = launch_spec(&self.cli, &self.onboard.settings);
         self.onboard.close();
         self.onboard_needs_push = false;
+        self.onboard_acked = false;
+        self.onboard_tries = 0;
         self.ready = false;
         self.failure = None;
         self.logs.clear();
         self.webview.load_html(SKELETON).ok();
+        self.onboarding = false;
         window.set_title(&self.title_for(&format!("{APP_TITLE} — 正在启动…")));
         eprintln!("dsh-desktop: 启动 {}", self.spec.command_line());
 
         match Host::spawn(self.spec.clone()) {
-            Ok(host) => self.host = Some(host),
+            Ok(host) => {
+                let _ = std::fs::create_dir_all(dsh_platform::runtime_dir());
+                let _ = std::fs::write(host_pid_file(), host.pid().to_string());
+                self.host = Some(host);
+            }
             Err(err) => {
                 self.fail(
                     window,
@@ -1102,8 +1293,21 @@ impl App {
                         });
                     match routed {
                         Some(request) => {
-                            let effect = self.onboard.handle(&request, &self.candidates());
-                            self.apply_onboard_effect(window, effect);
+                            // 引导页脚本跑完会自己报「ready」：这时才相信后续的 evaluate_script 落到了正确的文档上。
+                            if request.get("cmd").and_then(serde_json::Value::as_str)
+                                == Some("ready")
+                            {
+                                self.onboard_acked = true;
+                                self.onboard_needs_push = true;
+                            } else {
+                                eprintln!("dsh-desktop: 引导页指令 {request}");
+                                let effect = self.onboard.handle(&request, &self.candidates());
+                                // 处理过一条命令就推一次新快照：以前这里靠每帧无条件推送，
+                                // 结果页面每 100ms 重建一次按钮，mousedown 与 mouseup 落在
+                                // 不同节点上，`click` 永远不触发（自定义按钮全部「点不动」）。
+                                self.onboard_needs_push = true;
+                                self.apply_onboard_effect(window, effect);
+                            }
                         }
                         None => self.handle_shim(other),
                     }
@@ -1553,11 +1757,15 @@ impl App {
     fn drain_menu(&mut self, window: &tao::window::Window) {
         for action in self.menubar.drain_events() {
             match action {
+                // 引导页里按 Ctrl+R 没东西可“重新加载”，直接当成“回主界面”。
                 menu::Action::Reload => {
-                    if let Err(err) = self.webview.reload() {
+                    if self.onboarding {
+                        self.start_host(window);
+                    } else if let Err(err) = self.webview.reload() {
                         eprintln!("dsh-desktop: 重新加载失败：{err}");
                     }
                 }
+                menu::Action::Main => self.start_host(window),
                 menu::Action::Onboard => self.open_onboarding(window, None),
                 menu::Action::OpenLogs => self.open_logs(),
                 menu::Action::PasteScreenshot => self.deliver_clipboard_image(),
@@ -1671,7 +1879,8 @@ impl App {
     fn open_logs(&mut self) {
         let dir = state_dir();
         let _ = std::fs::create_dir_all(&dir);
-        spawn_detached("xdg-open", &[&dir.display().to_string()]);
+        // macOS 上 xdg-open 不存在，这个按钮会静默没反应；走平台分发。
+        open_external(&dir.display().to_string());
     }
 
     fn show_about(&self, _window: &tao::window::Window) {
@@ -1716,7 +1925,11 @@ impl App {
         self.onboard.open(&self.candidates(), banner);
         window.set_title(&self.title_for(&format!("{APP_TITLE} — 安装引导")));
         self.webview.load_html(ONBOARDING).ok();
+        self.onboarding = true;
         self.onboard_needs_push = true;
+        self.onboard_acked = false;
+        self.onboard_tries = 0;
+        self.onboard_reloads = 0;
     }
 
     /// 每帧推进引导页：跑执行队列、落盘设置、把快照推给页面。
@@ -1725,6 +1938,11 @@ impl App {
             return;
         }
         let effect = self.onboard.tick(&self.candidates());
+        let (pid, url, ready) = match self.host.as_ref() {
+            Some(host) => (Some(host.pid()), self.origin.clone(), host.is_ready()),
+            None => (None, None, false),
+        };
+        self.onboard.set_host_status(pid, url, ready);
         if self.onboard.take_dirty()
             && let Err(err) = setup_settings::save(&state_dir(), &self.onboard.settings)
         {
@@ -1733,6 +1951,40 @@ impl App {
         self.apply_onboard_effect(window, effect);
         if !self.onboard.visible() {
             return;
+        }
+
+        // 页面还没回报「就位」：每帧补推一次（拿到握手就停）。
+        const UNACKED_PUSH_LIMIT: u8 = 50;
+        if !self.onboard_acked {
+            self.onboard_needs_push = true;
+            self.onboard_tries = self.onboard_tries.saturating_add(1);
+            if self.onboard_tries == UNACKED_PUSH_LIMIT {
+                // 自愈：先用重加载把没跑起来的脚本稿活（WebKit 偶尔把 `with_html` 的文档停在白页）。
+                const ONBOARD_RELOAD_LIMIT: u8 = 1;
+                if self.onboard_reloads < ONBOARD_RELOAD_LIMIT {
+                    self.onboard_reloads += 1;
+                    self.onboard_tries = 0;
+                    eprintln!(
+                        "dsh-desktop: 引导页 5 秒内没有回报就位，重载文档（第 {} 次）",
+                        self.onboard_reloads
+                    );
+                    self.webview.load_html(ONBOARDING).ok();
+                } else {
+                    eprintln!(
+                        "dsh-desktop: 引导页重载后仍未回报就位，停止补推（页面脚本可能没跑起来）"
+                    );
+                    // 报告页面实况：IPC 句柄在不在、快照钩子建没建、按钮在不在。
+                    self.probe_script(
+                        r#"JSON.stringify({ipc: typeof window.ipc, hook: typeof window.__onboard, ready: document.readyState, body: document.body.innerText.length, script: document.querySelectorAll('script').length, button: (document.querySelector('[data-cmd="probe"]')||{}).tagName || null})"#,
+                    );
+                    self.probe_script(
+                        r#"(function(){var b=document.querySelector('[data-cmd="probe"]'); if(!b) return 'no-button'; if(b.disabled) return 'button-disabled'; b.click(); return 'clicked';})()"#,
+                    );
+                }
+            }
+            if self.onboard_tries > UNACKED_PUSH_LIMIT {
+                self.onboard_needs_push = false;
+            }
         }
 
         let rev = self.onboard.rev();
@@ -1766,7 +2018,6 @@ impl App {
                 std::process::exit(0);
             }
         }
-        self.onboard_needs_push = true;
     }
 
     fn persist_window_state(&self, window: &tao::window::Window) {
@@ -1794,6 +2045,7 @@ impl App {
         if let Some(mut host) = self.host.take() {
             host.stop();
         }
+        let _ = std::fs::remove_file(host_pid_file());
         if let Some(instance) = self.instance.take() {
             instance.release();
         }
@@ -1851,4 +2103,130 @@ fn spawn_detached(program: &str, args: &[&str]) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use crate::{ONBOARDING, SKELETON};
+
+    /// 页面里的内联脚本一旦有语法错误，整段 JS 都不执行：页面只剩静态骨架（黑屏 / 空白引导页），
+    /// 而且壳侧 `evaluate_script` 只会静默失败，很难从日志上看出来。0.1.5 的引导页就是栽在这里
+    /// （一个字符串用单引号开头、双引号结尾）。这里做最小的字面量配平检查，够挡住这类手滑。
+    fn unbalanced_literal(script: &str) -> Option<(usize, char)> {
+        let mut chars = script.char_indices().peekable();
+        let mut line = 1;
+        while let Some((at, c)) = chars.next() {
+            if c == '\n' {
+                line += 1;
+                continue;
+            }
+            if c == '/' {
+                match chars.peek().map(|(_, next)| *next) {
+                    // 行注释跳过；块注释一路跳到闭合（块注释里换行也要计数）。
+                    Some('/') => {
+                        for (_, next) in chars.by_ref() {
+                            if next == '\n' {
+                                line += 1;
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    Some('*') => {
+                        chars.next();
+                        let mut prev = '\0';
+                        for (_, next) in chars.by_ref() {
+                            if next == '\n' {
+                                line += 1;
+                            }
+                            if prev == '*' && next == '/' {
+                                break;
+                            }
+                            prev = next;
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                }
+            }
+            if c != '\'' && c != '"' && c != '`' {
+                continue;
+            }
+            let quote = c;
+            let start = line;
+            loop {
+                let Some((_, next)) = chars.next() else {
+                    return Some((start, quote));
+                };
+                match next {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '\n' => line += 1,
+                    _ if next == quote => break,
+                    _ => {}
+                }
+            }
+            let _ = at;
+        }
+        None
+    }
+
+    fn inline_scripts(html: &'static str) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut rest = html;
+        while let Some(start) = rest.find("<script>") {
+            let body = &rest[start + "<script>".len()..];
+            let Some(end) = body.find("</script>") else {
+                break;
+            };
+            out.push(&body[..end]);
+            rest = &body[end + "</script>".len()..];
+        }
+        out
+    }
+
+    #[test]
+    fn inline_scripts_have_balanced_string_literals() {
+        for (name, html) in [("onboarding", ONBOARDING), ("skeleton", SKELETON)] {
+            for script in inline_scripts(html) {
+                assert!(
+                    unbalanced_literal(script).is_none(),
+                    "{name}.html 的内联脚本有未闭合的字符串：{:?}",
+                    unbalanced_literal(script)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn onboarding_exposes_the_snapshot_hook() {
+        assert!(
+            ONBOARDING.contains("window.__onboard = function"),
+            "引导页必须暴露 window.__onboard，壳靠它推快照"
+        );
+    }
+
+    /// 页面重绘必须在内容真的变了才碰 DOM。以前每次快照都重写 `#foot`，按钮节点被
+    /// 重建，mousedown/mouseup 落在不同节点上 → `click` 不触发 → 「按钮点不动」。
+    #[test]
+    fn the_footer_is_repainted_through_paint() {
+        assert!(
+            ONBOARDING.contains("paint(\"foot\""),
+            "底部按钮必须走 paint(\"foot\", ...)，否则快照会把按钮节点重建掉"
+        );
+        assert!(
+            !ONBOARDING.contains("document.getElementById(\"foot\").innerHTML"),
+            "不要再直接写 #foot 的 innerHTML"
+        );
+    }
+
+    /// 环境页要有「dsh 进程」卡片：当前壳连的宿主 + 孤儿列表 + 清理按钮。
+    #[test]
+    fn the_env_page_shows_running_hosts() {
+        assert!(ONBOARDING.contains("hostsCard"), "环境页要画 dsh 进程卡片");
+        assert!(ONBOARDING.contains("\"scan-hosts\""), "要有重新扫描按钮");
+        assert!(ONBOARDING.contains("\"reap-hosts\""), "要有清理孤儿按钮");
+        assert!(ONBOARDING.contains("S.hosts"), "快照要带 hosts 字段");
+    }
 }

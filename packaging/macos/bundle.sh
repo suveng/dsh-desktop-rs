@@ -29,6 +29,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>dev.suveng.dsh-desktop</string>
   <key>CFBundleExecutable</key><string>$APP</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>$APP.icns</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
@@ -45,11 +46,16 @@ PLIST
 if command -v iconutil >/dev/null && [ -f packaging/linux/icons/$APP-512.png ]; then
   ICONSET="$ROOT/target/package/$APP.iconset"
   rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-  for size in 16 32 64 128 256 512; do
-    sips -z $size $size "packaging/linux/icons/$APP-512.png" \
-      --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  # 必须成对给出 1x/2x，否则 iconutil 会整包失败（老脚本只给 1x，靠 `|| true` 把错误吞了，
+  # 生成的 icns 只有半套尺寸）。1024 从 512 放大，Retina 下比缺图强。
+  for pair in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x 256:256x256 512:256x256@2x 512:512x512 1024:512x512@2x; do
+    size=${pair%%:*}
+    name=${pair##*:}
+    sips -z "$size" "$size" "packaging/linux/icons/$APP-512.png" \
+      --out "$ICONSET/icon_$name.png" >/dev/null
   done
-  iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/$APP.icns" || true
+  iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/$APP.icns" \
+    || echo "!! icns 生成失败：应用会显示成默认图标"
 fi
 
 cp LICENSE "$APP_DIR/Contents/Resources/" 2>/dev/null || true

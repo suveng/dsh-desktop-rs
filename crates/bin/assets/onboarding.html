@@ -106,6 +106,7 @@
   let S = null;
   let lastPanel = "";
   let lastLogLen = -1;
+  let acked = false;
 
   function send(cmd, extra) {
     const payload = Object.assign({ kind: "onboard", cmd: cmd }, extra || {});
@@ -121,7 +122,14 @@
   window.__onboard = function (json) {
     S = JSON.parse(json);
     render();
+    // 能收到快照就说明 IPC 双向都通了；此时的报到一定能送到（脚本顶部的首次报到
+    // 可能赶在原生侧装好 IPC 桥之前发出，会静默丢掉）。
+    if (!acked) {
+      acked = true;
+      send("ready");
+    }
   };
+
 
   function chips() {
     const e = S.env || {};
@@ -135,10 +143,10 @@
       : "dsh 未安装";
     const np = n.state === "ready" ? "ok" : (n.state === "too_old" ? "warn" : "bad");
     const dp = d.state === "ready" ? "ok" : (d.state === "out_of_range" ? "warn" : "bad");
-    document.getElementById("sub").innerHTML =
+    paint("sub",
       '<span class="pill ' + np + '">' + esc(nodeTxt) + '</span> ' +
       '<span class="pill ' + dp + '">' + esc(dshTxt) + '</span>' +
-      (e.dsh_home ? ' <span class="pill">' + esc(e.dsh_home) + '</span>' : '');
+      (e.dsh_home ? ' <span class="pill">' + esc(e.dsh_home) + '</span>' : ''));
   }
 
   const STEPS = [["env", "环境"], ["proxy", "代理"], ["version", "版本"], ["profile", "Profile"], ["progress", "安装"], ["done", "完成"]];
@@ -148,14 +156,14 @@
   function nav() {
     const at = ORDER.indexOf(S.screen);
     if (at > furthest) furthest = at;
-    document.getElementById("nav").innerHTML = STEPS.map(([key, label], i) => {
+    paint("nav", STEPS.map(([key, label], i) => {
       const cls = i === at ? "step on" : (i < at ? "step done" : "step");
       const text = esc((i + 1) + ". " + label);
       // 「安装」「完成」两页由流程驱动，不给直接跳。
       const reachable = i <= furthest && i < ORDER.length - 2;
       if (!reachable) return '<div class="' + cls + '">' + text + "</div>";
       return '<div class="' + cls + ' go" data-cmd="goto" data-screen="' + key + '">' + text + "</div>";
-    }).join("");
+    }).join(""));
   }
 
   function statusRow(name, pill, cls, detail) {
@@ -174,16 +182,39 @@
       d.state === "missing" ? "将从 npm 安装" : ((d.version || "?") + " · " + (d.source || "") + "  " + (d.program || "")));
     const web = (e.web_profiles || []);
     rows += statusRow("profiles", web.length ? web.length + " 个可启动" : "没有可启动的", web.length ? "ok" : "bad",
-      (e.profiles || []).map((p) => p.name + (p.web ? "" : "（无 Web）")).join("、") || "还没有任何 profile");
-    const ready = e.ready;
+      (e.profiles || []).map((p) => p.name + (p.web ? "" : "（无 Web）")).join("、") || "还没有任何 profile");    const ready = e.ready;
     const nodeCard = n.state === "ready" ? "" :
       '<div class="card"><label class="field"><span>要安装的 node 版本</span>' +
       '<input type="text" data-field="node_version" value="' + esc(p_node_version()) + '" placeholder="24.13.0"></label>' +
       '<p class="hint">从 nodejs.org 官方 tarball 下载，按 SHASUMS256 校验后解压到用户目录；留空则装 24.13.0。</p></div>';
     return '<div class="card">' + rows + "</div>" +
       '<p class="hint">需要 node ≥ 24.9；dsh 支持区间 0.2.2-alpha.2 ≤ v &lt; 0.3。安装落在 ' + esc(e.data_dir || "") + "，不污染系统目录。</p>" +
+      hostsCard() +
       nodeCard +
       (ready ? '<p class="hint">环境已经齐了，点「启动」即可。</p>' : "");
+  }
+
+  // 「dsh 进程」：壳当前连着哪个宿主、机器上还挂着几个孤儿。
+  // 孤儿 = 上次壳没来得及收的宿主（⌘Q / 强杀 / 崩溃都会留下），它们还占着端口和实例锁。
+  function hostsCard() {
+    const h = S.hosts || {};
+    const cur = h.current, orphans = h.orphans || [];
+    let rows = "";
+    rows += statusRow("当前壳", cur ? (cur.ready ? "已连接" : "启动中") : "未连接",
+      cur ? (cur.ready ? "ok" : "warn") : "warn",
+      cur ? ("pid " + cur.pid + " · 已运行 " + cur.uptime + (cur.url ? " · " + cur.url : "")) :
+        (h.expected_pid ? ("找不到 pid " + h.expected_pid + "（可能已退出）") : "壳还没启动宿主"));
+    rows += statusRow("孤儿", orphans.length ? orphans.length + " 个" : "没有",
+      orphans.length ? "warn" : "ok",
+      orphans.length ? orphans.map((p) => "pid " + p.pid + "（运行 " + p.uptime + "）").join("、") :
+        "没有遗留进程，退出时都会一起收掉");
+    rows += statusRow("扫描", h.total != null ? h.total + " 个 dsh 进程" : "未扫描", "ok",
+      "壳 pid " + (h.shell || "?"));
+    return '<div class="card"><p class="hint" style="margin-top:0">dsh 进程</p>' + rows +
+      '<div class="row" style="justify-content:flex-end;gap:8px">' +
+      btn("scan-hosts", "重新扫描", "", false) +
+      btn("reap-hosts", "清理孤儿", "", !orphans.length) +
+      "</div></div>";
   }
 
   function p_node_version() {
@@ -218,7 +249,7 @@
       '<textarea data-field="extra_path" rows="3" placeholder="/Users/you/.nvm/versions/node/v24.18.0/bin">' + esc(p.extra_path || "") + "</textarea></label>" +
       '<label class="field"><span>额外环境变量（每行 KEY=VALUE）</span>' +
       '<textarea data-field="env" rows="3" placeholder="HTTPS_PROXY=http://127.0.0.1:7890">' + esc(p.env || "") + "</textarea></label>" +
-      '<p class="hint">从 Dock 启动时宿主的 PATH 只有 /usr/bin:/bin。这里补的目录排在自动探测（登录 shell、nvm、volta、homebrew）之后，插件页的「检查更新」需要它能找到 pnpm。</p></div>";
+      '<p class="hint">从 Dock 启动时宿主的 PATH 只有 /usr/bin:/bin。这里补的目录排在自动探测（登录 shell、nvm、volta、homebrew）之后，插件页的「检查更新」需要它能找到 pnpm。</p></div>';
   }
 
   function field(key, label, value, placeholder) {
@@ -311,9 +342,8 @@
 
   function footer() {
     const busy = S.busy;
-    const b = [];
-    if (S.screen === "env") {
-      b.push(btn("probe", "重新检测", "", busy));
+    const b = [];    if (S.screen === "env") {
+      b.push(btn("probe", "重新检测", "", false));
       b.push(btn("goto:proxy", "下一步", "", busy));
       if (!(S.env || {}).ready) b.push(btn("install", "开始安装", "primary", busy));
     } else if (S.screen === "proxy") {
@@ -331,13 +361,31 @@
       else b.push(btn("install", "重试", "primary", false));
       b.push(btn("goto:env", "查看环境", "", busy));
     } else {
-      b.push(btn("probe", "重新检测", "", busy));
+      // 「重新检测」不带 disabled：它只是重跑环境探测，拉版本列表时也能点。
+      b.push(btn("probe", "重新检测", "", false));
+      // 环境就绪但版本旧：把更新入口提到这一页，省的再点一次导航。
+      const newest = (S.versions || [])[0] || "";
+      const have = ((S.env || {}).dsh || {}).version || "";
+      if (newest && have && newest !== have) {
+        b.push(btn("goto:version", "更新到 " + newest, "", busy));
+      }
       b.push(btn("start", "启动", "primary", busy || !(S.env || {}).ready));
     }
     b.push(btn("open-logs", "打开日志目录", "", false));
     b.push(btn("quit", "退出", "", false));
     const hint = S.screen === "version" ? "更新与回退都在这一步：选版本 → 开始安装。" : "";
-    document.getElementById("foot").innerHTML = '<span class="grow">' + esc(hint) + "</span>" + b.join("");
+    paint("foot", '<span class="grow">' + esc(hint) + "</span>" + b.join(""));
+  }
+
+  // 只有内容真变了才碰 DOM。以前每次快照（曾每 100ms 一次）都重建按钮，
+  // mousedown 与 mouseup 于是落在不同节点上，浏览器的 `click` 永远不会触发——
+  // 这就是「按钮怎么点都没反应」的真正原因。
+  const painted = {};
+  function paint(id, html) {
+    if (painted[id] === html) return false;
+    painted[id] = html;
+    document.getElementById(id).innerHTML = html;
+    return true;
   }
 
   function btn(cmd, label, cls, disabled) {
@@ -367,14 +415,14 @@
     if (!S) return;
     chips();
     nav();
-    const key = S.screen + "|" + S.rev;
-    if (key !== lastPanel) {
-      lastPanel = key;
+    let html = "";
+    if (S.banner) html += '<div class="banner"><b>' + esc(S.banner.summary) + "</b><br>" + esc(S.banner.detail) + "</div>";
+    if (S.notice) html += '<div class="notice">' + esc(S.notice) + "</div>";
+    html += panel();
+    // 用 HTML 内容本身做缓存键：`rev` 变了但内容没变时也不重建 DOM。
+    if (html !== lastPanel) {
       const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.field : null;
-      let html = "";
-      if (S.banner) html += '<div class="banner"><b>' + esc(S.banner.summary) + "</b><br>" + esc(S.banner.detail) + "</div>";
-      if (S.notice) html += '<div class="notice">' + esc(S.notice) + "</div>";
-      html += panel();
+      lastPanel = html;
       document.getElementById("main").innerHTML = html;
       if (focus) {
         const next = document.querySelector('[data-field="' + focus + '"]');
@@ -399,20 +447,42 @@
     return out;
   }
 
+  // 点击诊断的第一环：`pointerdown` 是否到了页面。如果用户点完完全没有 `down`，
+  // 就是原生层没把鼠标事件送进 webview（窗口不是 key window / 有东西挡住了）。
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      send("down", {
+        hit: event.target.tagName + "." + (typeof event.target.className === "string" ? event.target.className : ""),
+        x: Math.round(event.clientX),
+        y: Math.round(event.clientY),
+        b: event.button,
+      });
+    },
+    true
+  );
+
   document.addEventListener("click", (event) => {
+    // 每次点击都把「命中元素 + 坐标」带给壳：用户说按钮点不动时，日志里能直接看出
+    // 点到的是哪个元素（`loghead` / `BUTTON` / `BODY`...），不用猜命中偏移。
+    const where = {
+      hit: event.target.tagName + "." + (typeof event.target.className === "string" ? event.target.className : ""),
+      x: Math.round(event.clientX),
+      y: Math.round(event.clientY),
+    };
     const head = event.target.closest(".loghead");
-    if (head) { send("toggle-log"); return; }
+    if (head) { send("toggle-log", where); return; }
     const el = event.target.closest("[data-cmd]");
-    if (!el || el.tagName === "INPUT") return;
+    if (!el || el.tagName === "INPUT") { send("miss", where); return; }
     const cmd = el.dataset.cmd;
     if (cmd === "import") {
       const name = document.querySelector('[data-field="import_name"]');
-      send("import", { name: name ? name.value : "" });
+      send("import", Object.assign({ name: name ? name.value : "" }, where));
       return;
     }
-    if (cmd === "goto") { send("goto", { screen: el.dataset.screen }); return; }
-    if (el.tagName === "BUTTON" && el.disabled) return;
-    send(cmd);
+    if (cmd === "goto") { send("goto", Object.assign({ screen: el.dataset.screen }, where)); return; }
+    if (el.tagName === "BUTTON" && el.disabled) { send("disabled", Object.assign({ want: cmd }, where)); return; }
+    send(cmd, where);
   });
 
   document.addEventListener("change", (event) => {
@@ -422,6 +492,14 @@
     if (el.dataset.field === "import_name") return;
     send("save", { settings: collectSettings() });
   });
+
+  // 报到必须放在所有定义和监听之后：这句万一抛异常，也不能把上面的按钮监听一起带走。
+  // 壳收到这条才停补推快照（冷启动时首帧快照常常打在还没解析完的空白文档上）。
+  try {
+    send("ready");
+  } catch (err) {
+    // 静默：壳那边有 5 秒超时诊断。
+  }
 </script>
 </body>
 </html>

@@ -257,6 +257,14 @@ pub struct Onboard {
     autostart: bool,
     /// 结构变化计数：界面据此决定要不要整块重画。
     rev: u64,
+    /// 点过几次「重新检测」。检测结果没变时界面也要有变化，否则用户以为点击没生效。
+    probes: u32,
+    /// 进程表里扫到的 dsh 宿主（含壳自己连的那个和遗留的孤儿）。
+    hosts: Vec<crate::hostscan::DshProcess>,
+    /// 壳当前连着的宿主（`None` = 壳自己没起宿主，比如还在引导阶段）。
+    host_pid: Option<u32>,
+    host_url: Option<String>,
+    host_ready: bool,
     /// 最近一次备份 / 当前选中的备份文件。
     selected_backup: Option<PathBuf>,
     /// 导入时要复制的归档（由文件选择器选好）。
@@ -287,6 +295,11 @@ impl Onboard {
             versions_fetched: false,
             autostart: false,
             rev: 0,
+            probes: 0,
+            hosts: Vec::new(),
+            host_pid: None,
+            host_url: None,
+            host_ready: false,
             selected_backup: None,
             pending_archive: None,
             dirty: true,
@@ -310,6 +323,7 @@ impl Onboard {
         self.error = None;
         self.notice = None;
         self.refresh(candidates);
+        self.refresh_hosts();
         if self.env.ready(&self.settings) {
             // 环境其实是好的（例如用户从菜单进来做版本/备份管理、或失败另有原因）：
             // 停在「完成」页——那里有环境概览、启动按钮和失败诊断，但**不自动重启**：
@@ -398,6 +412,31 @@ impl Onboard {
         self.env = detect(&self.paths, candidates, &self.settings);
         self.rev = self.rev.wrapping_add(1);
         self.dirty = true;
+    }
+
+    /// 壳告诉引导页：当前连的是哪个宿主。每帧喂一次，不动 `rev`（免得每帧重画）。
+    pub fn set_host_status(&mut self, pid: Option<u32>, url: Option<String>, ready: bool) {
+        if self.host_pid != pid || self.host_url != url || self.host_ready != ready {
+            self.host_pid = pid;
+            self.host_url = url;
+            self.host_ready = ready;
+            // 状态变了界面要重描，但只描这一次（`dirty` 只影响渲染，不进 `rev`）。
+            self.rev = self.rev.wrapping_add(1);
+        }
+    }
+
+    /// 重扫进程表（会调用 `ps`，只在打开引导页 / 点检测 / 点清理时跑）。
+    pub fn refresh_hosts(&mut self) {
+        self.hosts = crate::hostscan::scan();
+    }
+
+    /// 不属于「壳当前连的宿主」且已经没人管的 dsh。
+    fn orphans(&self) -> Vec<&crate::hostscan::DshProcess> {
+        let shell = std::process::id();
+        self.hosts
+            .iter()
+            .filter(|proc| proc.is_orphan(shell, self.host_pid))
+            .collect()
     }
 
     /// 每帧调一次：推进执行队列。
@@ -816,9 +855,48 @@ impl Onboard {
             }
             "save" => self.apply_settings(cmd.get("settings")),
             "probe" => {
-                if !self.busy() {
-                    self.refresh(candidates);
-                }
+                // 刻意不看 `busy()`：拉版本列表（`npm view`）在慢网络上要十几秒，
+                // 这期间用户点「重新检测」不该被当成无效操作默默吞掉。
+                self.refresh(candidates);
+                self.refresh_hosts();
+                self.probes = self.probes.wrapping_add(1);
+                // 环境没变时界面本来一个像素都不会动，点击就像没反应：给一句带次数的回执。
+                let state = if self.env.ready(&self.settings) {
+                    "环境就绪"
+                } else {
+                    "环境仍不完整"
+                };
+                let orphans = self.orphans().len();
+                let hosts = if orphans > 0 {
+                    format!("，{orphans} 个孤儿 dsh")
+                } else {
+                    String::new()
+                };
+                self.notice = Some(format!(
+                    "已重新检测（第 {} 次）：{state}{hosts}",
+                    self.probes
+                ));
+                self.rev = self.rev.wrapping_add(1);
+            }
+            "scan-hosts" => {
+                self.refresh_hosts();
+                self.notice = Some(format!(
+                    "扫描到 {} 个 dsh 进程，其中 {} 个孤儿",
+                    self.hosts.len(),
+                    self.orphans().len()
+                ));
+                self.rev = self.rev.wrapping_add(1);
+            }
+            "reap-hosts" => {
+                let before = self.orphans().len();
+                let killed = crate::hostscan::reap(self.host_pid);
+                self.refresh_hosts();
+                self.notice = Some(if before == 0 {
+                    "没有需要清理的孤儿 dsh".to_owned()
+                } else {
+                    format!("已清理 {killed} 个孤儿 dsh（原有 {before} 个）")
+                });
+                self.rev = self.rev.wrapping_add(1);
             }
             "install" => {
                 self.request(cmd, candidates);
@@ -977,6 +1055,8 @@ impl Onboard {
                 self.notice = Some("环境还不完整，先完成安装".to_owned());
                 self.rev = self.rev.wrapping_add(1);
             }
+            // 页面上报的点击诊断（点空了 / 点到禁用按钮）：只在 stderr 留痕，不进用户看的「安装日志」。
+            "miss" | "disabled" | "down" => {}
             other => {
                 push_log(&mut self.log, "warn", format!("未知命令 {other:?}"));
                 self.rev = self.rev.wrapping_add(1);
@@ -1187,6 +1267,27 @@ impl Onboard {
                 },
             },
             "versions": self.versions,
+            "hosts": {
+                "shell": std::process::id(),
+                "current": self.hosts.iter()
+                    .find(|proc| Some(proc.pid) == self.host_pid)
+                    .map(|proc| json!({
+                        "pid": proc.pid,
+                        "ppid": proc.ppid,
+                        "uptime": proc.uptime,
+                        "command": proc.command,
+                        "url": self.host_url,
+                        "ready": self.host_ready,
+                    })),
+                "expected_pid": self.host_pid,
+                "orphans": self.orphans().into_iter().map(|proc| json!({
+                    "pid": proc.pid,
+                    "ppid": proc.ppid,
+                    "uptime": proc.uptime,
+                    "command": proc.command,
+                })).collect::<Vec<_>>(),
+                "total": self.hosts.len(),
+            },
             "history": self.settings.history.iter().map(|entry| json!({
                 "version": entry.version,
                 "program": entry.program,
@@ -1240,6 +1341,8 @@ fn step_note_wanted(step: &Step) -> bool {
 }
 
 fn push_log(log: &mut Vec<LogLine>, kind: &'static str, text: String) {
+    // 页面上的「安装日志」跟一份到 stderr：用户只能截图，日志文件里能直接查。
+    eprintln!("dsh-desktop: 引导页日志 [{kind}] {text}");
     log.push(LogLine { kind, text });
     // 安装日志几百行足够定位问题；不设上限会让 view() 每次 tick 都序列化一大坨。
     if log.len() > 2000 {

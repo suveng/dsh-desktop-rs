@@ -15,6 +15,8 @@ use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 pub enum Action {
     /// 安装引导 / 环境管理：装 node、装/更新/回退 dsh、选 profile、备份还原。
     Onboard,
+    /// 从引导页 / 报错页回到宿主界面（重新起宿主进程）。
+    Main,
     Reload,
     OpenLogs,
     Quit,
@@ -34,6 +36,7 @@ impl Action {
     pub fn id(self) -> &'static str {
         match self {
             Self::Onboard => "onboard",
+            Self::Main => "main",
             Self::Reload => "reload",
             Self::OpenLogs => "open-logs",
             Self::Quit => "quit",
@@ -82,6 +85,12 @@ fn bindings() -> Vec<(&'static str, Vec<Binding>)> {
                     "安装引导 / 环境管理…",
                     Some(accel(M::CONTROL | M::SHIFT, C::KeyI)),
                     "Ctrl+Shift+I",
+                ),
+                b(
+                    Action::Main,
+                    "返回主界面",
+                    Some(accel(M::CONTROL | M::ALT, C::KeyM)),
+                    "Ctrl+Alt+M",
                 ),
                 b(
                     Action::Reload,

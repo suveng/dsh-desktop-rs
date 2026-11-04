@@ -30,11 +30,26 @@ const MARK: &str = "__DSH_DESKTOP_PATH__";
 /// 用 `-ilc` 走交互式登录初始化：nvm 一般只把 `bin` 加在 `.zshrc` / `.bashrc` 里，
 /// 只加 `-c` 拿不到。输出用一对标记包住，rc 里的 echo / 提示符不会混进结果。
 #[must_use]
+/// 启动时要用的 shell：`$SHELL` 优先。
+///
+/// Dock / Finder / LaunchServices 启动的进程拿不到 `$SHELL`，此时按平台默认顺序挑一个，
+/// 否则 nvm / volta 这些只在 rc 文件里生效的目录就永远探测不到（面板会误报「node 未安装」）。
+fn shell_program() -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os("SHELL").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(value));
+    }
+    ["/bin/zsh", "/bin/bash", "/bin/sh"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+}
+
+#[must_use]
 pub fn login_shell_path() -> Option<PathBuf> {
     if std::env::var_os(DISABLE_VAR).is_some_and(|value| value != "0") {
         return None;
     }
-    let shell = std::env::var_os("SHELL").filter(|value| !value.is_empty())?;
+    let shell = shell_program()?;
     let script = format!("printf '%s%s%s' '{MARK}' \"$PATH\" '{MARK}'");
     let mut child = Command::new(&shell)
         .args(["-ilc", &script])
