@@ -89,6 +89,7 @@ impl Job {
         cwd: Option<&Path>,
     ) -> std::io::Result<Self> {
         let mut cmd = Command::new(program);
+        dsh_platform::quiet(&mut cmd);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

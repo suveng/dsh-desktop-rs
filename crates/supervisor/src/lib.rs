@@ -258,6 +258,7 @@ impl Host {
     /// 拉起源宿主。返回时子进程已创建，就绪事件稍后从 `poll()` 里出来。
     pub fn spawn(spec: LaunchSpec) -> std::io::Result<Self> {
         let mut cmd = Command::new(&spec.program);
+        dsh_platform::quiet(&mut cmd);
         cmd.args(&spec.args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

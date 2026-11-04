@@ -204,8 +204,10 @@ pub fn run_version(
     extra: &[PathBuf],
 ) -> Option<(Option<Version>, String)> {
     let output = match exec_retrying_busy(|| {
-        Command::new(program)
-            .args(leading)
+        let mut cmd = Command::new(program);
+        // Windows 上别为每次 `--version` 探测闪一个控制台窗口。
+        dsh_platform::quiet(&mut cmd);
+        cmd.args(leading)
             .arg("--version")
             .env("PATH", path_with(extra))
             .output()

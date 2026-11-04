@@ -495,6 +495,7 @@ const MIN_HOST_VERSION: &str = dsh_setup::settings::MIN_HOST_VERSION;
 fn probe_host_version(cli: &Cli) -> Option<String> {
     let (program, prefix) = host_command(cli);
     let mut cmd = std::process::Command::new(&program);
+    dsh_platform::quiet(&mut cmd);
     cmd.args(&prefix)
         .arg("--version")
         .stdin(std::process::Stdio::null())
@@ -2160,7 +2161,10 @@ fn open_external(url: &str) {
 }
 
 fn spawn_detached(program: &str, args: &[&str]) {
-    let _ = std::process::Command::new(program)
+    let mut cmd = std::process::Command::new(program);
+    // Windows 上不加这个，`cmd /C start` / 默认浏览器会连带闪一个控制台窗口。
+    dsh_platform::quiet(&mut cmd);
+    let _ = cmd
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

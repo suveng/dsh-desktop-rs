@@ -94,7 +94,9 @@ pub fn check(feed: Option<&str>, current: &str) -> Status {
 }
 
 fn fetch(url: &str) -> Result<String, String> {
-    let output = Command::new("curl")
+    let mut cmd = Command::new("curl");
+    dsh_platform::quiet(&mut cmd);
+    let output = cmd
         .args(["-fsSL", "--max-time", "10", url])
         .stdin(Stdio::null())
         .output()

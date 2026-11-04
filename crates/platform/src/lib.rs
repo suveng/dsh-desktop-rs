@@ -69,6 +69,23 @@ fn base_dir(var: &str, fallback: &str) -> PathBuf {
     }
 }
 
+/// 让子进程在 Windows 上不要开控制台窗口。
+///
+/// 壳是 GUI 进程，本身没有控制台。这时候 spawn 一个控制台程序（`node`、`npm.cmd`、
+/// `dsh.cmd`、`curl`、`tar`、`cmd /C start`）系统会**给它新开一个黑窗口**，
+/// 用户看到的就是「一堆 cmd 窗口一闪一闪」。加 `CREATE_NO_WINDOW` 就不会了；
+/// 非 Windows 上是空操作（本来就没有这回事）。
+pub fn quiet(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 /// 用户主目录：`$HOME`，Windows 上 `$HOME` 通常不存在、要看 `%USERPROFILE%`。
 ///
 /// 只认 `$HOME` 的话 Windows 会回退到 `.`（相对当前目录）——于是 settings.json、
