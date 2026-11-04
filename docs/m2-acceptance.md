@@ -24,7 +24,8 @@
 - `crates/bin/src/menu.rs`：muda 菜单 + 快捷键表。
 - `crates/bin/assets/shim.js`：`window.dshDesktop` / `__DSH_DIRECTORY_PICKER__` / `__DSH_HOST_PATHS__`。
 - `crates/bin/src/main.rs`：单实例、深链转发、崩溃自动重启（1s/2s 退避 + 60s 稳定后熔断复位）、`--selftest`。
-- `scripts/smoke.sh` + `scripts/compare_shots.py` + `tests/baseline/failure-page.png` + CI `smoke` job。
+- `scripts/smoke.sh` + CI `smoke` job（失败页后来被安装引导页取代，见 `docs/onboarding.md`；
+  场景 1 改为断言「启动失败 → 引导页画出来了」，不再做像素基线）。
 
 ## 3. 最重要的一个 bug：shim 让前端插件炸掉
 

@@ -134,6 +134,8 @@ pub struct LaunchSpec {
     program: PathBuf,
     args: Vec<String>,
     cwd: Option<PathBuf>,
+    /// 额外注入的环境变量。键名大小写敏感，同名的后设值覆盖先设值。
+    envs: Vec<(String, String)>,
     ready_timeout: Duration,
     stop_grace: Duration,
 }
@@ -145,6 +147,7 @@ impl LaunchSpec {
             program: program.into(),
             args: Vec::new(),
             cwd: None,
+            envs: Vec::new(),
             ready_timeout: DEFAULT_READY_TIMEOUT,
             stop_grace: DEFAULT_STOP_GRACE,
         }
@@ -178,6 +181,31 @@ impl LaunchSpec {
     pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
         self.cwd = Some(dir.into());
         self
+    }
+
+    /// 追加一个环境变量。自动装出来的 node 靠它把 bin 目录塞进宿主进程的 PATH。
+    #[must_use]
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.envs.push((key.into(), value.into()));
+        self
+    }
+
+    /// 批量追加环境变量（例如 install 的代理变量）。
+    #[must_use]
+    pub fn envs<I, K, V>(mut self, envs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.envs
+            .extend(envs.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
+    #[must_use]
+    pub fn extra_env(&self) -> &[(String, String)] {
+        &self.envs
     }
 
     #[must_use]
@@ -236,6 +264,9 @@ impl Host {
             .stderr(Stdio::piped());
         if let Some(dir) = &spec.cwd {
             cmd.current_dir(dir);
+        }
+        for (key, value) in &spec.envs {
+            cmd.env(key, value);
         }
 
         #[cfg(unix)]

@@ -653,6 +653,7 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "dsh-platform",
+ "dsh-setup",
  "dsh-supervisor",
  "global-hotkey",
  "gtk",
@@ -673,6 +674,17 @@ version = "0.1.3"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dsh-setup"
+version = "0.1.3"
+dependencies = [
+ "dsh-platform",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

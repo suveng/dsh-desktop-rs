@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark">
+<title>DeepSeek Harness — 安装引导</title>
+<style>
+  :root { color-scheme: dark; --bg: #16171a; --panel: #1d1e22; --line: #2e2f35; --text: #e6e6e6; --dim: #9a9ba3; --accent: #0c8ce9; --ok: #3fb950; --warn: #d29922; --bad: #f24822; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font-family: "Inter", "Noto Sans CJK SC", system-ui, sans-serif;
+    font-size: 13px; line-height: 1.6; overflow: hidden;
+  }
+  header { padding: 22px 28px 12px; display: flex; gap: 14px; align-items: flex-start; }
+  .badge { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(135deg, #0c8ce9, #6f4ef2); flex: none; display: grid; place-items: center; font-weight: 700; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .sub { color: var(--dim); font-size: 12px; margin: 2px 0 0; }
+  nav { display: flex; gap: 6px; padding: 0 28px; }
+  .step {
+    flex: 1 1 0; min-width: 0; padding: 7px 0 9px; border-top: 2px solid var(--line);
+    color: #6f7077; font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .step.on { border-top-color: var(--accent); color: var(--text); }
+  .step.done { border-top-color: var(--ok); color: #a9b3a9; }
+  .step.go { cursor: pointer; }
+  .step.go:hover { color: var(--text); }
+  main { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 28px 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .card + .card { margin-top: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+  .row + .row { border-top: 1px solid #26272c; }
+  .name { width: 78px; color: var(--dim); flex: none; }
+  .val { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 12px; word-break: break-all; }
+  .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); flex: none; }
+  .pill.ok { color: var(--ok); border-color: #24512c; background: #16251a; }
+  .pill.warn { color: var(--warn); border-color: #4a3a12; background: #241f10; }
+  .pill.bad { color: var(--bad); border-color: #4f2318; background: #24140f; }
+  .banner { border: 1px solid #4f2318; background: #24140f; color: #f3b8a9; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
+  .banner b { color: #ffd7cc; }
+  .notice { border: 1px solid #4a3a12; background: #241f10; color: #e3c98a; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
+  label.field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+  label.field span { color: var(--dim); font-size: 12px; }
+  input[type=text], select {
+    font: inherit; font-family: ui-monospace, monospace; font-size: 12px;
+    background: #131418; color: var(--text); border: 1px solid #34353c; border-radius: 6px; padding: 7px 9px;
+  }
+  input[type=text]:focus, select:focus { outline: none; border-color: var(--accent); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  .hint { color: #7c7d85; font-size: 12px; margin: 4px 0 0; }
+  .choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px; }
+  .choice { display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px; border: 1px solid #26272c; border-radius: 8px; cursor: pointer; }
+  .choice:hover { border-color: #3a3b42; }
+  .choice input { margin-top: 3px; }
+  .choice b { font-weight: 600; }
+  .choice small { display: block; color: var(--dim); }
+  .list { display: flex; flex-direction: column; gap: 4px; font-family: ui-monospace, monospace; font-size: 12px; color: #b9bac1; }
+  .list div { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  footer { flex: none; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 28px 16px; border-top: 1px solid #222329; }
+  footer .grow { flex: 1 1 120px; min-width: 0; color: #7c7d85; font-size: 12px; }
+  button {
+    font: inherit; padding: 8px 14px; border-radius: 6px; cursor: pointer; flex: none;
+    border: 1px solid #34353c; background: #232428; color: var(--text);
+  }
+  button:hover:not(:disabled) { background: #2a2b30; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #0a7fd4; }
+  button.danger { color: #f3b8a9; border-color: #4f2318; background: #24140f; }
+  .logbox { flex: none; border-top: 1px solid #222329; background: #131418; }
+  .loghead { display: flex; align-items: center; gap: 10px; padding: 7px 28px; cursor: pointer; user-select: none; }
+  .loghead .title { font-size: 12px; color: var(--dim); flex: none; }
+  .loghead .last { flex: 1; color: #6f7077; font-family: ui-monospace, monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .loghead .chev { color: #6f7077; font-size: 11px; }
+  pre.log { margin: 0; padding: 0 28px 12px; height: 190px; max-height: 32vh; overflow: auto; font-family: ui-monospace, monospace; font-size: 11.5px; color: #a8a9b1; white-space: pre-wrap; word-break: break-word; user-select: text; }
+  pre.log .err { color: #f29b8b; }
+  pre.log .warn { color: #d9bd7a; }
+  pre.log .info { color: #7fb0d9; }
+  pre.log .cmd { color: #8f8f97; }
+  .spin { width: 12px; height: 12px; border: 2px solid #3a3b42; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; vertical-align: -2px; margin-right: 7px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="badge">DS</div>
+  <div>
+    <h1>准备运行环境</h1>
+    <p class="sub" id="sub">桌面壳需要 node ≥ 24.9 与 dsh，没装就在这里装好。</p>
+  </div>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+<section class="logbox">
+  <div class="loghead" data-cmd="toggle-log">
+    <span class="title" id="logtitle">安装日志</span>
+    <span class="last" id="loglast"></span>
+    <span class="chev" id="logchev"></span>
+  </div>
+  <pre class="log" id="log"></pre>
+</section>
+<footer id="foot"></footer>
+<script>
+  let S = null;
+  let lastPanel = "";
+  let lastLogLen = -1;
+
+  function send(cmd, extra) {
+    const payload = Object.assign({ kind: "onboard", cmd: cmd }, extra || {});
+    if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(JSON.stringify(payload));
+  }
+
+  function esc(v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+
+  window.__onboard = function (json) {
+    S = JSON.parse(json);
+    render();
+  };
+
+  function chips() {
+    const e = S.env || {};
+    const n = e.node || { state: "missing" };
+    const d = e.dsh || { state: "missing" };
+    const nodeTxt = n.state === "ready" ? "node v" + esc(n.version)
+      : n.state === "too_old" ? "node v" + esc(n.version) + "（过低）"
+      : "node 未安装";
+    const dshTxt = d.state === "ready" ? "dsh " + esc(d.version)
+      : d.state === "out_of_range" ? "dsh " + esc(d.version || "?") + "（不支持）"
+      : "dsh 未安装";
+    const np = n.state === "ready" ? "ok" : (n.state === "too_old" ? "warn" : "bad");
+    const dp = d.state === "ready" ? "ok" : (d.state === "out_of_range" ? "warn" : "bad");
+    document.getElementById("sub").innerHTML =
+      '<span class="pill ' + np + '">' + esc(nodeTxt) + '</span> ' +
+      '<span class="pill ' + dp + '">' + esc(dshTxt) + '</span>' +
+      (e.dsh_home ? ' <span class="pill">' + esc(e.dsh_home) + '</span>' : '');
+  }
+
+  const STEPS = [["env", "环境"], ["proxy", "代理"], ["version", "版本"], ["profile", "Profile"], ["progress", "安装"], ["done", "完成"]];
+  const ORDER = STEPS.map(([key]) => key);
+  // 已经走到过的最远一步：走过的步骤可以点回去改（比如装到一半回去调代理）。
+  let furthest = 0;
+  function nav() {
+    const at = ORDER.indexOf(S.screen);
+    if (at > furthest) furthest = at;
+    document.getElementById("nav").innerHTML = STEPS.map(([key, label], i) => {
+      const cls = i === at ? "step on" : (i < at ? "step done" : "step");
+      const text = esc((i + 1) + ". " + label);
+      // 「安装」「完成」两页由流程驱动，不给直接跳。
+      const reachable = i <= furthest && i < ORDER.length - 2;
+      if (!reachable) return '<div class="' + cls + '">' + text + "</div>";
+      return '<div class="' + cls + ' go" data-cmd="goto" data-screen="' + key + '">' + text + "</div>";
+    }).join("");
+  }
+
+  function statusRow(name, pill, cls, detail) {
+    return '<div class="row"><span class="name">' + esc(name) + '</span><span class="pill ' + cls + '">' + esc(pill) + '</span><span class="val">' + esc(detail || "") + "</span></div>";
+  }
+
+  function panelEnv() {
+    const e = S.env || {};
+    const n = e.node || {}, d = e.dsh || {};
+    let rows = "";
+    rows += statusRow("node", n.state === "ready" ? "就绪" : (n.state === "too_old" ? "版本过低" : "未安装"),
+      n.state === "ready" ? "ok" : (n.state === "too_old" ? "warn" : "bad"),
+      n.state === "missing" ? "下面会自动下载官方 tarball（约 30 MB）" : (n.version + "  " + (n.program || "")));
+    rows += statusRow("dsh", d.state === "ready" ? "就绪" : (d.state === "out_of_range" ? "不支持" : "未安装"),
+      d.state === "ready" ? "ok" : "bad",
+      d.state === "missing" ? "将从 npm 安装" : ((d.version || "?") + " · " + (d.source || "") + "  " + (d.program || "")));
+    const web = (e.web_profiles || []);
+    rows += statusRow("profiles", web.length ? web.length + " 个可启动" : "没有可启动的", web.length ? "ok" : "bad",
+      (e.profiles || []).map((p) => p.name + (p.web ? "" : "（无 Web）")).join("、") || "还没有任何 profile");
+    const ready = e.ready;
+    const nodeCard = n.state === "ready" ? "" :
+      '<div class="card"><label class="field"><span>要安装的 node 版本</span>' +
+      '<input type="text" data-field="node_version" value="' + esc(p_node_version()) + '" placeholder="24.13.0"></label>' +
+      '<p class="hint">从 nodejs.org 官方 tarball 下载，按 SHASUMS256 校验后解压到用户目录；留空则装 24.13.0。</p></div>';
+    return '<div class="card">' + rows + "</div>" +
+      '<p class="hint">需要 node ≥ 24.9；dsh 支持区间 0.2.2-alpha.2 ≤ v &lt; 0.3。安装落在 ' + esc(e.data_dir || "") + "，不污染系统目录。</p>" +
+      nodeCard +
+      (ready ? '<p class="hint">环境已经齐了，点「启动」即可。</p>' : "");
+  }
+
+  function p_node_version() {
+    return (S.settings || {}).node_version || "";
+  }
+
+  function panelProxy() {
+    const p = S.settings || {};
+    return '<div class="card">' +
+      '<div class="grid2">' +
+      field("http", "HTTP 代理", p.http, "http://127.0.0.1:7890") +
+      field("https", "HTTPS 代理", p.https, "http://127.0.0.1:7890") +
+      field("all", "ALL_PROXY", p.all, "socks5://127.0.0.1:7890") +
+      field("no_proxy", "不走代理的主机", p.no_proxy, "localhost,127.0.0.1") +
+      "</div>" +
+      '<label class="field"><span>npm 镜像（留空则用 ~/.npmrc 里的 registry）</span>' +
+      '<input type="text" data-field="npm_registry" value="' + esc(p.npm_registry || "") + '" placeholder="https://registry.npmmirror.com"></label>' +
+      "</div>" +
+      '<div class="card"><div class="choices">' +
+      choice("install_scope", "auto", p.install_scope, "优先全局安装", "先试 npm 全局；没有权限时自动改装到 " + esc((S.paths || {}).user_prefix || "用户目录")) +
+      choice("install_scope", "global", p.install_scope, "只装全局", "失败就报错，不自动回退") +
+      choice("install_scope", "user", p.install_scope, "只装用户目录", "完全不碰系统目录") +
+      "</div></div>" +
+      '<p class="hint">代理只作用于安装 / 下载子进程，宿主进程不会继承；文件权限 0600，界面与日志里凭据会被遮掉。</p>';
+  }
+
+  function field(key, label, value, placeholder) {
+    return '<label class="field"><span>' + esc(label) + '</span><input type="text" data-field="' + key + '" value="' + esc(value || "") + '" placeholder="' + esc(placeholder) + '"></label>';
+  }
+
+  function choice(field, value, current, title, desc) {
+    const checked = (current || "auto") === value ? " checked" : "";
+    return '<label class="choice"><input type="radio" name="' + field + '" data-field="' + field + '" data-value="' + esc(value) + '"' + checked + '><span><b>' + esc(title) + "</b><small>" + esc(desc) + "</small></span></label>";
+  }
+
+  function panelVersion() {
+    const p = S.settings || {};
+    const versions = S.versions || [];
+    let options = versions.map((v) => '<option value="' + esc(v) + '"' + (v === p.dsh_version ? " selected" : "") + ">" + esc(v) + "</option>").join("");
+    if (!options) options = '<option value="' + esc(p.dsh_version || "") + '">' + esc(p.dsh_version || "默认") + "</option>";
+    const history = (S.history || []).map((h) => "<div><span>" + esc(h.version) + "</span><span>" + esc(h.program) + "</span></div>").join("") || "<div><span>还没有安装记录</span><span></span></div>";
+    return '<div class="card"><label class="field"><span>安装版本</span>' +
+      '<select data-field="dsh_version">' + options + "</select></label>" +
+      '<p class="hint">下拉里是已发布且落在支持区间内的版本；默认 ' + esc(S.settings.dsh_version) + "。装完可以直接在「完成」页启动。</p></div>" +
+      '<div class="card"><div class="row"><span class="name">历史</span><span class="val">最近安装过的版本（用于回退）</span></div>' +
+      '<div class="list" style="margin-top:6px">' + history + "</div></div>";
+  }
+
+  function panelProfile() {
+    const e = S.env || {};
+    const p = S.settings || {};
+    const web = e.web_profiles || [];
+    const choices = (e.profiles || []).map((prof) =>
+      '<label class="choice"><input type="radio" name="profile" data-field="profile" data-value="' + esc(prof.name) + '"' +
+      (prof.name === p.profile ? " checked" : "") + (prof.web ? "" : " disabled") +
+      '><span><b>' + esc(prof.name) + "</b><small>" +
+      (prof.web ? "可当桌面宿主" : "缺少 @deepseek-ai/dsh-web-app，不能启动") +
+      (prof.deps ? " · 依赖已就绪" : " · 缺 node_modules") + "</small></span></label>").join("") ||
+      '<p class="hint">还没有任何 profile，先用 dsh 创建一个（或从备份导入）。</p>';
+    const backups = (S.backups || []).map((b) =>
+      '<label class="choice"><input type="radio" name="backup" data-cmd="select-backup" data-value="' + esc(b.path) + '"' +
+      (S.selected_backup === b.path ? " checked" : "") + "><span><b>" + esc(b.profile) + "</b><small>" + esc(b.stamp) + " · " + Math.round(b.bytes / 1024) + " KB</small></span></label>").join("") ||
+      '<p class="hint">还没有备份。点「备份当前 profile」生成一份（不含 node_modules）。</p>';
+    return '<div class="card"><div class="row"><span class="name">启动 profile</span><span class="val">' +
+      (web.length ? "只能从带 Web App 的 profile 里选" : "没有可启动的 profile") + "</span></div>" +
+      '<div class="choices" style="margin-top:8px">' + choices + "</div></div>" +
+      '<div class="card"><div class="row"><span class="name">备份</span><span class="val">' + esc((S.paths || {}).backups || "") + "</span></div>" +
+      '<div class="choices" style="margin-top:8px">' + backups + "</div>" +
+      '<div class="row" style="border:none;padding-top:10px;flex-wrap:wrap">' +
+      '<button data-cmd="backup">备份当前 profile</button>' +
+      '<button data-cmd="restore"' + (S.selected_backup ? "" : " disabled") + ">还原选中的备份</button>" +
+      '<button data-cmd="pick-backup">从文件还原…</button>' +
+      "</div></div>" +
+      '<div class="card"><div class="row"><span class="name">导入</span><span class="val">' +
+      esc(S.pending_archive || "选择一个 tar.gz 归档，作为新 profile 导入") + "</span></div>" +
+      '<div class="row" style="border:none;padding-top:8px;flex-wrap:wrap">' +
+      '<button data-cmd="pick-import">选择归档…</button>' +
+      '<input type="text" data-field="import_name" placeholder="新 profile 名（留空取文件名）">' +
+      '<button data-cmd="import"' + (S.pending_archive ? "" : " disabled") + ">导入</button>" +
+      "</div></div>";
+  }
+
+  function panelProgress() {
+    let body = "";
+    if (S.error) {
+      body = '<div class="banner"><b>安装失败</b><br>' + esc(S.error) + "</div>" +
+        '<p class="hint">完整的命令输出在下面的日志里。修好网络/权限后点「重试」。</p>';
+    } else if (S.busy) {
+      body = '<div class="card"><div class="row" style="border:none"><span class="spin"></span><span class="val">' + esc(S.busy_label || "准备中…") + "</span></div>" +
+        '<p class="hint">下载与安装的实时输出在下面的日志面板，可以展开/收起。</p></div>';
+    } else {
+      body = '<div class="card"><p class="hint">队列是空的。点「重试」重新走一遍安装。</p></div>';
+    }
+    return body;
+  }
+
+  function panelDone() {
+    const e = S.env || {};
+    return '<div class="card"><div class="row" style="border:none"><span class="pill ok">就绪</span>' +
+      '<span class="val">node v' + esc((e.node || {}).version || "?") + " · dsh " + esc((e.dsh || {}).version || "?") + " · profile " + esc((S.settings || {}).profile) + "</span></div>" +
+      '<p class="hint">点「启动」进入主界面。以后启动失败会直接回到这里。</p></div>';
+  }
+
+  function panel() {
+    switch (S.screen) {
+      case "proxy": return panelProxy();
+      case "version": return panelVersion();
+      case "profile": return panelProfile();
+      case "progress": return panelProgress();
+      case "done": return panelDone();
+      default: return panelEnv();
+    }
+  }
+
+  function footer() {
+    const busy = S.busy;
+    const b = [];
+    if (S.screen === "env") {
+      b.push(btn("probe", "重新检测", "", busy));
+      b.push(btn("goto:proxy", "下一步", "", busy));
+      if (!(S.env || {}).ready) b.push(btn("install", "开始安装", "primary", busy));
+    } else if (S.screen === "proxy") {
+      b.push(btn("goto:env", "上一步", "", busy));
+      b.push(btn("goto:version", "下一步", "primary", busy));
+    } else if (S.screen === "version") {
+      b.push(btn("goto:proxy", "上一步", "", busy));
+      b.push(btn("rollback", "回退到上一个版本", "", busy || !(S.history || []).length));
+      b.push(btn("goto:profile", "下一步", "primary", busy));
+    } else if (S.screen === "profile") {
+      b.push(btn("goto:version", "上一步", "", busy));
+      b.push(btn("install", "开始安装", "primary", busy));
+    } else if (S.screen === "progress") {
+      if (busy) b.push(btn("cancel", "取消", "danger", false));
+      else b.push(btn("install", "重试", "primary", false));
+      b.push(btn("goto:env", "查看环境", "", busy));
+    } else {
+      b.push(btn("probe", "重新检测", "", busy));
+      b.push(btn("start", "启动", "primary", busy || !(S.env || {}).ready));
+    }
+    b.push(btn("open-logs", "打开日志目录", "", false));
+    b.push(btn("quit", "退出", "", false));
+    const hint = S.screen === "version" ? "更新与回退都在这一步：选版本 → 开始安装。" : "";
+    document.getElementById("foot").innerHTML = '<span class="grow">' + esc(hint) + "</span>" + b.join("");
+  }
+
+  function btn(cmd, label, cls, disabled) {
+    const action = cmd.startsWith("goto:") ? "goto" : cmd;
+    const screen = cmd.startsWith("goto:") ? ' data-screen="' + cmd.slice(5) + '"' : "";
+    return '<button data-cmd="' + action + '"' + screen + (cls ? ' class="' + cls + '"' : "") + (disabled ? " disabled" : "") + ">" + esc(label) + "</button>";
+  }
+
+  function renderLog() {
+    const pre = document.getElementById("log");
+    const lines = S.log || [];
+    if (lines.length === lastLogLen) return;
+    lastLogLen = lines.length;
+    pre.innerHTML = lines.map((l) => {
+      const cls = l.kind === "err" ? "err" : (l.kind === "warn" ? "warn" : (l.kind === "info" ? "info" : ""));
+      return '<span class="' + cls + '">' + esc(l.text) + "</span>";
+    }).join("\n");
+    pre.scrollTop = pre.scrollHeight;
+    const last = lines.length ? lines[lines.length - 1].text : "";
+    document.getElementById("loglast").textContent = last;
+    document.getElementById("logtitle").textContent = "安装日志（" + lines.length + " 行）";
+    document.getElementById("logchev").textContent = S.log_open ? "收起 ▾" : "展开 ▸";
+    pre.style.display = S.log_open ? "block" : "none";
+  }
+
+  function render() {
+    if (!S) return;
+    chips();
+    nav();
+    const key = S.screen + "|" + S.rev;
+    if (key !== lastPanel) {
+      lastPanel = key;
+      const focus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.field : null;
+      let html = "";
+      if (S.banner) html += '<div class="banner"><b>' + esc(S.banner.summary) + "</b><br>" + esc(S.banner.detail) + "</div>";
+      if (S.notice) html += '<div class="notice">' + esc(S.notice) + "</div>";
+      html += panel();
+      document.getElementById("main").innerHTML = html;
+      if (focus) {
+        const next = document.querySelector('[data-field="' + focus + '"]');
+        if (next) next.focus();
+      }
+    }
+    footer();
+    renderLog();
+  }
+
+  function collectSettings() {
+    const out = {};
+    document.querySelectorAll("[data-field]").forEach((el) => {
+      const key = el.dataset.field;
+      if (key === "import_name") return;
+      if (el.type === "radio") {
+        if (el.checked) out[key] = el.dataset.value;
+      } else {
+        out[key] = el.value;
+      }
+    });
+    return out;
+  }
+
+  document.addEventListener("click", (event) => {
+    const head = event.target.closest(".loghead");
+    if (head) { send("toggle-log"); return; }
+    const el = event.target.closest("[data-cmd]");
+    if (!el || el.tagName === "INPUT") return;
+    const cmd = el.dataset.cmd;
+    if (cmd === "import") {
+      const name = document.querySelector('[data-field="import_name"]');
+      send("import", { name: name ? name.value : "" });
+      return;
+    }
+    if (cmd === "goto") { send("goto", { screen: el.dataset.screen }); return; }
+    if (el.tagName === "BUTTON" && el.disabled) return;
+    send(cmd);
+  });
+
+  document.addEventListener("change", (event) => {
+    const el = event.target.closest("[data-field]");
+    if (!el) return;
+    if (el.dataset.field === "backup") { send("select-backup", { path: el.dataset.value }); return; }
+    if (el.dataset.field === "import_name") return;
+    send("save", { settings: collectSettings() });
+  });
+</script>
+</body>
+</html>

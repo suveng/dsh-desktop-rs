@@ -7,10 +7,11 @@ mod clipboard;
 mod desktop;
 mod embed;
 mod menu;
+mod onboard;
 mod update;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -24,11 +25,15 @@ use wry::{NewWindowResponse, WebViewBuilder};
 
 use dsh_platform::instance::{self, Claim, Command, Instance};
 use dsh_platform::{WindowState, load_window_state, save_window_state, state_dir};
+use dsh_setup::envcheck::{self, Candidate, Source};
+use dsh_setup::node;
+use dsh_setup::settings::{self as setup_settings, Settings};
+use dsh_setup::version::Version;
 use dsh_supervisor::{Event as HostEvent, Host, LaunchSpec};
 
 const APP_TITLE: &str = "DeepSeek Harness";
 const SKELETON: &str = include_str!("../assets/skeleton.html");
-const FAILURE: &str = include_str!("../assets/failure.html");
+const ONBOARDING: &str = include_str!("../assets/onboarding.html");
 const SHIM: &str = include_str!("../assets/shim.js");
 
 /// `DSH_DESKTOP_DEBUG_DOM=1` 时注入：点完 700ms 把浮层 DOM 的样式/文本打回壳里。
@@ -136,6 +141,8 @@ fn install_signal_handlers() {
 }
 
 fn main() {
+    // webview 隔离会把 XDG_DATA_HOME 指到 tmpfs，先把「装 node / dsh 的目录」钉死。
+    dsh_platform::pin_paths();
     // WebKitGTK 的 DMA-BUF 渲染器在部分驱动上会让 backdrop-filter 浮层的**内容**不绘制：
     // 只看到模糊底、看不到菜单文字（dsh 的菜单表面用 backdrop-filter）。
     // 壳默认关掉它；用户显式设置过就尊重用户。
@@ -169,6 +176,10 @@ fn main() {
         return;
     }
 
+    if cli.onboard_selftest {
+        std::process::exit(run_onboard_selftest(&cli));
+    }
+
     let code = if cli.probe {
         run_probe(&cli)
     } else {
@@ -179,6 +190,7 @@ fn main() {
 
 // ---------------------------------------------------------------- 命令行
 
+#[derive(Clone)]
 struct Cli {
     host_program: Option<PathBuf>,
     /// `--host-cmd "pnpm dsh"`：第一个词是可执行文件，其余是插在标准参数之前的参数。
@@ -201,6 +213,8 @@ struct Cli {
     selftest_menu: bool,
     /// 无窗口：只查一次更新并打印 JSON。
     check_update: bool,
+    /// 无窗口：跑一遍安装引导（装 node / 装 dsh / 复检），打印日志与结果。
+    onboard_selftest: bool,
     version: bool,
     help: bool,
 }
@@ -219,6 +233,7 @@ impl Cli {
   --simulate-drop <path>  自检用：假装拖入一个路径（可重复），验证真实路径回填
   --update-feed <url>     更新源（JSON：{version,url}）；默认读 DSH_DESKTOP_UPDATE_FEED
   --check-update          无窗口：查一次更新并打印 JSON
+  --onboard-selftest      无窗口：跑一遍安装引导（装 node / 装 dsh / 复检）并打印日志
   --selftest-chat         有窗口：在壳内发一条消息（配合会话库核对）
   -V, --version           打印版本
   -h, --help              打印本帮助
@@ -240,6 +255,7 @@ impl Cli {
                 .ok()
                 .filter(|v| !v.is_empty()),
             selftest_chat: false,
+            onboard_selftest: false,
             selftest_menu: false,
             check_update: false,
             version: false,
@@ -269,6 +285,7 @@ impl Cli {
                 "--simulate-drop" => cli.simulate_drop.push(value(&mut it, "--simulate-drop")?),
                 "--update-feed" => cli.update_feed = Some(value(&mut it, "--update-feed")?),
                 "--selftest-chat" => cli.selftest_chat = true,
+                "--onboard-selftest" => cli.onboard_selftest = true,
                 "--selftest-menu" => {
                     cli.selftest = true;
                     cli.selftest_menu = true;
@@ -288,16 +305,40 @@ fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, St
     it.next().ok_or_else(|| format!("{flag} 需要一个值"))
 }
 
-/// `dsh --profile web` 的标准参数（`startup.ts:64-66`）。
-const STANDARD_ARGS: [&str; 7] = [
-    "--profile",
-    "web",
-    "--host",
-    "127.0.0.1",
-    "--port",
-    "0",
-    "--no-open",
-];
+/// `--profile <名字>` + 监听参数（`startup.ts:64-66`）。
+fn standard_args(profile: &str) -> Vec<String> {
+    vec![
+        "--profile".to_owned(),
+        profile.to_owned(),
+        "--host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--port".to_owned(),
+        "0".to_owned(),
+        "--no-open".to_owned(),
+    ]
+}
+
+/// 宿主候选，按优先级：开发树 → 用户目录安装 → 壳自己装的 node 前缀 → PATH → pnpm 兜底。
+fn host_candidates(cli: &Cli) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    // 源码工作区里 `dsh` 全局装的往往是旧版（0.1.x）。工作区编译产物既新又快
+    // （就绪 785ms vs `pnpm dsh` 1885ms），所以它优先于 PATH 里的同名命令。
+    if let Some(entry) = compiled_harness_entry(cli) {
+        out.push(
+            Candidate::new("node", Source::Workspace).with_args([entry.display().to_string()]),
+        );
+    }
+    let paths = onboard::Paths::from_platform();
+    out.push(Candidate::new(paths.user_dsh(), Source::UserPrefix));
+    // 「优先全局安装」在全新机器上会落到壳自己装的 node 前缀里——那条路径不在 PATH 上，
+    // 不扫就只能回退到 `pnpm dsh`，然后把装好的环境误判成失败。
+    out.extend(onboard::node_prefix_candidates(&paths));
+    if let Some(path) = which("dsh") {
+        out.push(Candidate::new(path, Source::Path));
+    }
+    out.push(Candidate::new("pnpm", Source::Pnpm));
+    out
+}
 
 /// 宿主命令：可执行文件 + 插在标准参数之前的参数。
 fn host_command(cli: &Cli) -> (PathBuf, Vec<String>) {
@@ -307,19 +348,16 @@ fn host_command(cli: &Cli) -> (PathBuf, Vec<String>) {
     if let Some(path) = &cli.host_program {
         return (path.clone(), Vec::new());
     }
-    // 源码工作区里 `dsh` 全局装的往往是旧版（0.1.x）。工作区编译产物既新又快
-    // （就绪 785ms vs `pnpm dsh` 1885ms），所以它优先于 PATH 里的同名命令。
-    if let Some(entry) = compiled_harness_entry(cli) {
-        return (PathBuf::from("node"), vec![entry.display().to_string()]);
+    let extra = [onboard::Paths::from_platform().user_prefix().join("bin")];
+    match envcheck::detect_dsh(&host_candidates(cli), &extra) {
+        Some(dsh) => (dsh.program, dsh.leading_args),
+        // 一个候选都不在：保持老行为，让失败信息里出现 `pnpm dsh`。
+        None => (PathBuf::from("pnpm"), vec!["dsh".to_owned()]),
     }
-    if let Some(path) = which("dsh") {
-        return (path, Vec::new());
-    }
-    (PathBuf::from("pnpm"), vec!["dsh".to_owned()])
 }
 
-/// 支持区间的下界（`architecture.md` D7）。
-const MIN_HOST_VERSION: &str = "0.2.2-alpha.2";
+/// 支持区间的下界（`architecture.md` D7）。和引导页共用一份定义，免得两边说法不一致。
+const MIN_HOST_VERSION: &str = dsh_setup::settings::MIN_HOST_VERSION;
 
 /// 跑一次 `--version`（带 5 秒超时），拿到宿主版本。
 fn probe_host_version(cli: &Cli) -> Option<String> {
@@ -367,30 +405,46 @@ fn parse_version(output: &str) -> Option<String> {
 
 /// 不在支持区间时给一句能贴到 issue 里的话；在区间内返回 `None`。
 fn version_note(version: &str) -> Option<String> {
-    let in_minor = {
-        let mut parts = version.split('.');
-        parts.next() == Some("0") && parts.next() == Some("2")
-    };
-    let at_least_min = !update::is_newer(MIN_HOST_VERSION, version);
-    if in_minor && at_least_min {
-        None
-    } else {
-        Some(format!(
-            "dsh {version} 不在支持区间（{MIN_HOST_VERSION} ≤ v < 0.3）"
-        ))
+    let supported = Version::parse(version)
+        .is_some_and(|parsed| parsed.in_range(&envcheck::min_host(), &envcheck::max_host()));
+    if supported {
+        return None;
     }
+    Some(format!(
+        "dsh {version} 不在支持区间（{MIN_HOST_VERSION} ≤ v < {}）",
+        dsh_setup::settings::MAX_HOST_VERSION
+    ))
 }
 
-/// 把 CLI 变成一份启动说明。
-fn launch_spec(cli: &Cli) -> LaunchSpec {
+/// 把 CLI + 设置变成一份启动说明。
+fn launch_spec(cli: &Cli, settings: &Settings) -> LaunchSpec {
     let (program, prefix) = host_command(cli);
 
-    let mut spec = LaunchSpec::new(program).args(prefix).args(STANDARD_ARGS);
+    let mut spec = LaunchSpec::new(program)
+        .args(prefix)
+        .args(standard_args(settings.target_profile()));
     if !cli.host_args.is_empty() {
         spec = spec.args(cli.host_args.clone());
     }
     if let Some(cwd) = &cli.host_cwd {
         spec = spec.cwd(cwd);
+    }
+    // 引导装出来的 node / dsh 不在系统 PATH 里，得显式垫到子进程 PATH 前面，
+    // 否则 `#!/usr/bin/env node` 的 shim 会找不到解释器。
+    let paths = onboard::Paths::from_platform();
+    let mut bins: Vec<PathBuf> = Vec::new();
+    if !settings.node_version.is_empty() {
+        let dir = node::bin_dir(&paths.data, &settings.node_version);
+        if dir.is_dir() {
+            bins.push(dir);
+        }
+    }
+    let user_bin = paths.user_prefix().join("bin");
+    if user_bin.is_dir() {
+        bins.push(user_bin);
+    }
+    if !bins.is_empty() {
+        spec = spec.env("PATH", envcheck::path_with(&bins).to_string_lossy());
     }
     spec
 }
@@ -430,7 +484,8 @@ fn is_executable(path: &std::path::Path) -> bool {
 // ---------------------------------------------------------------- 无窗口探针
 
 fn run_probe(cli: &Cli) -> i32 {
-    let spec = launch_spec(cli);
+    let settings = setup_settings::load(&state_dir());
+    let spec = launch_spec(cli, &settings);
     eprintln!("dsh-desktop: 启动 {}", spec.command_line());
     let mut host = match Host::spawn(spec) {
         Ok(host) => host,
@@ -469,6 +524,55 @@ fn run_probe(cli: &Cli) -> i32 {
     eprintln!("dsh-desktop: 等待就绪超时");
     host.stop();
     1
+}
+
+/// 无界面跑一遍安装引导：「自动装 node → 装 dsh → 复检」走的是 GUI 同一套 `Onboard`，
+/// 只是不渲染。全新机器验收 / CI 用（`--onboard-selftest`），退出码 0 表示环境就绪。
+fn run_onboard_selftest(cli: &Cli) -> i32 {
+    let candidates = host_candidates(cli);
+    let settings = setup_settings::load(&state_dir());
+    let mut onboard = onboard::Onboard::new(onboard::Paths::from_platform(), settings, &candidates);
+    onboard.open(&candidates, None);
+    println!("ONBOARD ENV {}", onboard.view()["env"]);
+    if !onboard.env_ready() {
+        onboard.handle(
+            &serde_json::json!({"kind": "onboard", "cmd": "install"}),
+            &candidates,
+        );
+    }
+    let mut printed = 0usize;
+    let mut started = false;
+    let deadline = Instant::now() + Duration::from_secs(30 * 60);
+    while onboard.busy() && Instant::now() < deadline {
+        if onboard.tick(&candidates) == onboard::Effect::StartHost {
+            started = true;
+        }
+        if onboard.take_dirty() {
+            let _ = setup_settings::save(&state_dir(), &onboard.settings);
+        }
+        let view = onboard.view();
+        if let Some(lines) = view["log"].as_array() {
+            for line in lines.iter().skip(printed) {
+                println!("  {}", line["text"].as_str().unwrap_or_default());
+            }
+            printed = lines.len();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let view = onboard.view();
+    let ready = onboard.env_ready();
+    println!(
+        "ONBOARD RESULT {}",
+        serde_json::json!({
+            "screen": view["screen"],
+            "ready": ready,
+            "node": view["env"]["node"],
+            "dsh": view["env"]["dsh"],
+            "start_host": started,
+            "error": view["error"],
+        })
+    );
+    i32::from(!ready)
 }
 
 // ---------------------------------------------------------------- 窗口
@@ -548,7 +652,14 @@ fn wipe_webview_storage() {
 fn install_signal_handlers() {}
 
 fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
-    let spec = launch_spec(&cli);
+    let settings = setup_settings::load(&state_dir());
+    let spec = launch_spec(&cli, &settings);
+    // 显式指定宿主 = 开发者 / CI 路径，环境对不对由他们负责，不弹引导页。
+    let explicit_host = cli.host_cmd.is_some() || cli.host_program.is_some();
+    // `npm prefix -g` 下的 dsh：只在启动时问一次 npm（几百毫秒），
+    // 但每次重探测都带上它——「优先全局安装」装成功就是靠这条认出来的。
+    let npm_global = onboard::npm_global_dsh(Path::new("npm"), &settings.install_env())
+        .map(|program| Candidate::new(program, envcheck::Source::NpmGlobal));
 
     // R4：先把 webview 的落盘目录搬到 tmpfs，再谈加载。
     isolate_webview_storage();
@@ -672,6 +783,18 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
         ipc,
         webview,
         restarts: 0,
+        onboard: {
+            let mut candidates = host_candidates(&cli);
+            if let Some(global) = &npm_global {
+                candidates.push(global.clone());
+            }
+            onboard::Onboard::new(onboard::Paths::from_platform(), settings, &candidates)
+        },
+        npm_global,
+        cli,
+        onboard_rev: 0,
+        onboard_log: 0,
+        onboard_needs_push: false,
     };
     if let Some(instance) = &app.instance {
         app.commands = Some(instance.commands());
@@ -684,7 +807,13 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     if app.tray.is_some() {
         eprintln!("dsh-desktop: 托盘已启用");
     }
-    app.start_host(&window);
+    // 环境不全就不硬启宿主了：直接上引导页（装 node、装 dsh、选 profile）。
+    if explicit_host || app.onboard.env_ready() {
+        app.start_host(&window);
+    } else {
+        eprintln!("dsh-desktop: 运行环境不完整，进入安装引导");
+        app.open_onboarding(&window, None);
+    }
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + TICK);
@@ -761,9 +890,37 @@ struct App {
     ipc: Arc<Mutex<Vec<String>>>,
     webview: wry::WebView,
     restarts: u32,
+    /// 安装引导：环境不全、或启动失败时接管界面。
+    onboard: onboard::Onboard,
+    /// `npm prefix -g` 下的 dsh（启动时问一次 npm 的结果）。
+    npm_global: Option<Candidate>,
+    /// 引导页装完东西后要按新设置重新拼启动说明，所以命令行也得留着。
+    cli: Cli,
+    /// 上一次推给页面的快照版本 / 日志行数，避免每帧重画。
+    onboard_rev: u64,
+    onboard_log: usize,
+    /// 页面刚加载或刚处理完命令：下一帧强制推一次快照。
+    onboard_needs_push: bool,
 }
 
 impl App {
+    /// 宿主候选：每次都按当前状态重算。
+    ///
+    /// 不能只在启动时算一次——刚 `npm i -g` 装好的 dsh 那时还不存在，
+    /// 复检用旧名单就会永远卡在「环境不全」。
+    fn candidates(&self) -> Vec<Candidate> {
+        let mut candidates = host_candidates(&self.cli);
+        // `npm prefix -g` 是在启动时问的一次（起 npm 几百毫秒），前缀不会变，
+        // 但 dsh 是后来才装进去的——所以这里按“现在是否存在”过滤，不能缓存成 Option<Candidate>。
+        if let Some(global) = &self.npm_global
+            && global.program.is_file()
+            && !candidates.iter().any(|c| c.program == global.program)
+        {
+            candidates.push(global.clone());
+        }
+        candidates
+    }
+
     fn title_for(&self, base: &str) -> String {
         match &self.version_note {
             Some(note) => format!("{base} · {note}"),
@@ -775,6 +932,10 @@ impl App {
         if let Some(mut old) = self.host.take() {
             old.stop();
         }
+        // 引导页可能刚装完 node / dsh 或换了 profile：重新拼一份启动说明。
+        self.spec = launch_spec(&self.cli, &self.onboard.settings);
+        self.onboard.close();
+        self.onboard_needs_push = false;
         self.ready = false;
         self.failure = None;
         self.logs.clear();
@@ -801,6 +962,7 @@ impl App {
         self.drive_selftest();
         self.finish_selftest_if_done();
         self.drain_ipc(window);
+        self.drive_onboard(window);
         self.drain_menu(window);
         self.drain_commands(window);
         self.drain_desktop(window);
@@ -923,7 +1085,22 @@ impl App {
                 }
                 // 页面侧粘贴到「没有文件也没有文本」的剪贴板时，请壳把位图送进来。
                 "clipboard-image" => self.deliver_clipboard_image(),
-                other if other.starts_with('{') => self.handle_shim(other),
+                other if other.starts_with('{') => {
+                    // 引导页的请求带 `kind:"onboard"`，别拿去喂给 shim（它只认 `id`）。
+                    let routed = serde_json::from_str::<serde_json::Value>(other)
+                        .ok()
+                        .filter(|request| {
+                            request.get("kind").and_then(serde_json::Value::as_str)
+                                == Some("onboard")
+                        });
+                    match routed {
+                        Some(request) => {
+                            let effect = self.onboard.handle(&request, &self.candidates());
+                            self.apply_onboard_effect(window, effect);
+                        }
+                        None => self.handle_shim(other),
+                    }
+                }
                 other => eprintln!("dsh-desktop: 未知的界面指令 {other:?}"),
             }
         }
@@ -1251,6 +1428,7 @@ impl App {
                         window.set_visible(true);
                         window.set_focus();
                     }
+                    desktop::TRAY_ONBOARD => self.open_onboarding(window, None),
                     desktop::TRAY_RELOAD => {
                         self.webview.reload().ok();
                     }
@@ -1373,6 +1551,7 @@ impl App {
                         eprintln!("dsh-desktop: 重新加载失败：{err}");
                     }
                 }
+                menu::Action::Onboard => self.open_onboarding(window, None),
                 menu::Action::OpenLogs => self.open_logs(),
                 menu::Action::PasteScreenshot => self.deliver_clipboard_image(),
                 menu::Action::Quit => {
@@ -1505,9 +1684,82 @@ impl App {
         // 标题用 ASCII，避免 CI 的 locale 影响 xdotool 匹配；中文留在页面里。
         window.set_title(&format!("{APP_TITLE} — startup failed"));
         desktop::notify(summary, detail);
-        self.webview
-            .load_html(&failure_page(summary, detail, &self.logs, &self.spec))
-            .ok();
+        // 任何启动失败都进引导页：它既能修环境（装 node / dsh、换 profile），
+        // 也把这次失败的诊断（命令 + 宿主日志尾巴）留在日志面板里。
+        let command = self.spec.command_line();
+        self.onboard
+            .note_failure(summary, detail, &command, &self.logs);
+        self.open_onboarding(window, Some((summary.to_owned(), detail.to_owned())));
+    }
+
+    /// 切到安装引导：停掉宿主，换成引导页。
+    fn open_onboarding(&mut self, window: &tao::window::Window, banner: Option<(String, String)>) {
+        if let Some(mut host) = self.host.take() {
+            host.stop();
+        }
+        self.ready = false;
+        self.restart_at = None;
+        let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+        eprintln!(
+            "dsh-desktop: 引导页窗口 {}x{}（缩放 {:.2}）",
+            size.width.round(),
+            size.height.round(),
+            window.scale_factor()
+        );
+        self.onboard.open(&self.candidates(), banner);
+        window.set_title(&self.title_for(&format!("{APP_TITLE} — 安装引导")));
+        self.webview.load_html(ONBOARDING).ok();
+        self.onboard_needs_push = true;
+    }
+
+    /// 每帧推进引导页：跑执行队列、落盘设置、把快照推给页面。
+    fn drive_onboard(&mut self, window: &tao::window::Window) {
+        if !self.onboard.visible() {
+            return;
+        }
+        let effect = self.onboard.tick(&self.candidates());
+        if self.onboard.take_dirty()
+            && let Err(err) = setup_settings::save(&state_dir(), &self.onboard.settings)
+        {
+            eprintln!("dsh-desktop: 保存设置失败：{err}");
+        }
+        self.apply_onboard_effect(window, effect);
+        if !self.onboard.visible() {
+            return;
+        }
+
+        let rev = self.onboard.rev();
+        let log = self.onboard.log_len();
+        if !self.onboard_needs_push && rev == self.onboard_rev && log == self.onboard_log {
+            return;
+        }
+        self.onboard_rev = rev;
+        self.onboard_log = log;
+        let snapshot = self.onboard.view().to_string();
+        let literal = serde_json::to_string(&snapshot).unwrap_or_else(|_| "\"\"".to_owned());
+        let script = format!("window.__onboard && window.__onboard({literal});");
+        match self.webview.evaluate_script(&script) {
+            Ok(()) => self.onboard_needs_push = false,
+            // 页面还没加载完就先不记账，下一帧再推。
+            Err(_) => self.onboard_needs_push = true,
+        }
+    }
+
+    fn apply_onboard_effect(&mut self, window: &tao::window::Window, effect: onboard::Effect) {
+        match effect {
+            onboard::Effect::None => {}
+            onboard::Effect::StartHost => {
+                self.onboard_needs_push = false;
+                self.start_host(window);
+            }
+            onboard::Effect::OpenLogs => self.open_logs(),
+            onboard::Effect::Quit => {
+                self.persist_window_state(window);
+                self.shutdown();
+                std::process::exit(0);
+            }
+        }
+        self.onboard_needs_push = true;
     }
 
     fn persist_window_state(&self, window: &tao::window::Window) {
@@ -1540,53 +1792,6 @@ impl App {
         }
         wipe_webview_storage();
     }
-}
-
-/// 失败页：一句话结论 + 可复制的诊断 + 三个按钮（`architecture.md` §8.3）。
-fn failure_page(summary: &str, detail: &str, logs: &VecDeque<String>, spec: &LaunchSpec) -> String {
-    let mut diag = String::new();
-    diag.push_str("命令: ");
-    diag.push_str(&spec.command_line());
-    diag.push_str("\n\n");
-    diag.push_str(detail);
-    if !logs.is_empty() {
-        diag.push_str("\n\n--- 宿主日志（最后 40 行）---\n");
-        for line in logs
-            .iter()
-            .rev()
-            .take(40)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            diag.push_str(line);
-            diag.push('\n');
-        }
-    }
-
-    FAILURE
-        .replace(
-            "id=\"summary\"></p>",
-            &format!("id=\"summary\">{}</p>", escape(summary)),
-        )
-        .replace(
-            "id=\"detail\"></pre>",
-            &format!("id=\"detail\">{}</pre>", escape(&diag)),
-        )
-}
-
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 /// `deviceInfo()` 的返回值：给前端显示用的一行摘要。
