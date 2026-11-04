@@ -205,9 +205,27 @@ fn attach_stderr(file: &std::fs::File) {
     }
 }
 
-/// `MM-DD HH:MM:SS`，给日志做会话分隔用。
-///
-/// 自己按 UTC 算，不依赖 `localtime_r`（Windows 上没有这个函数）。
+/// `MM-DD HH:MM:SS`，给日志做会话分隔用。unix 上用本地时间（跟用户的表一致）。
+#[cfg(unix)]
+fn stamp() -> String {
+    // SAFETY: `time`/`localtime_r` 都只写我们传进去的 `tm`。
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        format!(
+            "{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+}
+
+/// Windows 没有 `localtime_r`，只能自己按 UTC 算（差几小时不影响排障）。
+#[cfg(not(unix))]
 fn stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
