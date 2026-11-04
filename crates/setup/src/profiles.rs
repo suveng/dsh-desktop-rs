@@ -334,7 +334,8 @@ pub fn needs_deps(profile: &Path) -> bool {
 /// 在 profile 目录里跑 `pnpm install`（dsh 的 profile 本身就是 pnpm 项目）。
 pub fn repair_deps(profile: &Path) -> io::Result<Job> {
     Job::spawn(
-        Path::new("pnpm"),
+        // Windows 上是 `pnpm.cmd`：直接 spawn `pnpm` 会得到 os error 193。
+        &crate::envcheck::resolve_program("pnpm"),
         &["install".to_owned(), "--prefer-offline".to_owned()],
         &[],
         Some(profile),

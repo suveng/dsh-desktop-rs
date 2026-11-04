@@ -12,7 +12,7 @@ mod onboard;
 mod update;
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -422,7 +422,7 @@ fn host_command(cli: &Cli) -> (PathBuf, Vec<String>) {
     match envcheck::detect_dsh(&host_candidates(cli), &extra) {
         Some(dsh) => (dsh.program, dsh.leading_args),
         // 一个候选都不在：保持老行为，让失败信息里出现 `pnpm dsh`。
-        None => (PathBuf::from("pnpm"), vec!["dsh".to_owned()]),
+        None => (envcheck::resolve_program("pnpm"), vec!["dsh".to_owned()]),
     }
 }
 
@@ -550,23 +550,9 @@ fn compiled_harness_entry(cli: &Cli) -> Option<PathBuf> {
 }
 
 fn which(program: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(program))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    let result = {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::metadata(path)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    };
-    #[cfg(not(unix))]
-    let result = path.is_file();
-    result
+    // 走 `program_in`：Windows 上 `dsh` / `npm` / `pnpm` 都是 `.cmd`，直接按名字拼路径
+    // 会拿到无扩展名的 sh 脚本，spawn 时报 `os error 193`。
+    envcheck::find_in_path(program)
 }
 
 // ---------------------------------------------------------------- 无窗口探针
@@ -833,8 +819,9 @@ fn run_window_inner(cli: Cli, instance: Option<Instance>) -> i32 {
     let explicit_host = cli.host_cmd.is_some() || cli.host_program.is_some();
     // `npm prefix -g` 下的 dsh：只在启动时问一次 npm（几百毫秒），
     // 但每次重探测都带上它——「优先全局安装」装成功就是靠这条认出来的。
-    let npm_global = onboard::npm_global_dsh(Path::new("npm"), &settings.install_env())
-        .map(|program| Candidate::new(program, envcheck::Source::NpmGlobal));
+    let npm_global =
+        onboard::npm_global_dsh(&envcheck::resolve_program("npm"), &settings.install_env())
+            .map(|program| Candidate::new(program, envcheck::Source::NpmGlobal));
 
     // R4：先把 webview 的落盘目录搬到 tmpfs，再谈加载。
     isolate_webview_storage();

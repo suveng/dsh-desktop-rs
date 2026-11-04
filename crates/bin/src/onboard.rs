@@ -739,7 +739,7 @@ impl Onboard {
             Step::RepairDeps { profile } => {
                 let dir = paths.profiles_root().join(&profile);
                 match Job::spawn(
-                    Path::new("pnpm"),
+                    &pnpm_program(),
                     &["install".to_owned(), "--prefer-offline".to_owned()],
                     &env,
                     Some(&dir),
@@ -1461,12 +1461,17 @@ fn looks_like_permission_problem(err: &str) -> bool {
 /// npm 在哪：优先我们装的 node 旁边的 npm，其次 PATH。
 fn npm_program(env: &EnvReport) -> PathBuf {
     if let Some(bin) = &env.node_bin {
-        let candidate = bin.join("npm");
-        if candidate.is_file() {
+        // Windows 上要拿 `npm.cmd`：无扩展名的 `npm` 是 sh 脚本，spawn 直接 error 193。
+        if let Some(candidate) = envcheck::program_in(bin, "npm") {
             return candidate;
         }
     }
     envcheck::find_in_path("npm").unwrap_or_else(|| PathBuf::from("npm"))
+}
+
+/// 同 `npm_program`，只是找 pnpm（Windows 上是 `pnpm.cmd`，直接 spawn `pnpm` 会 error 193）。
+fn pnpm_program() -> PathBuf {
+    envcheck::resolve_program("pnpm")
 }
 
 fn spawn_worker(
@@ -1512,6 +1517,17 @@ pub fn npm_global_dsh(npm: &Path, env: &[(String, String)]) -> Option<PathBuf> {
     if prefix.is_empty() {
         return None;
     }
+    // npm 的前缀布局分平台：macOS / Linux 是 `<prefix>/bin/dsh`，Windows 直接是 `<prefix>/dsh.cmd`。
+    #[cfg(windows)]
+    let program = {
+        let dir = Path::new(prefix);
+        ["dsh.cmd", "dsh.exe", "dsh.ps1"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| dir.join("dsh.cmd"))
+    };
+    #[cfg(not(windows))]
     let program = Path::new(prefix).join("bin").join("dsh");
     Some(program)
 }

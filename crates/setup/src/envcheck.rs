@@ -130,21 +130,51 @@ pub fn is_executable(path: &Path) -> bool {
     }
 }
 
+/// 在单个目录里找程序，按平台补齐扩展名。
+///
+/// Windows 上 `npm` / `pnpm` / `dsh` 这几个都是 **批处理包装脚本**（`npm.cmd`），
+/// 同位还存在一个无扩展名的 `npm`（给 sh 用的）。直接 spawn 那个无扩展名的文件
+/// 只会在 `Command::spawn` 时报 `os error 193（不是有效的 Win32 应用程序）` ——
+/// 引导页「拉取版本列表失败」就是这么来的（0.1.7 的 Windows 报障）。
+#[must_use]
+pub fn program_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    program_in_impl(dir, name)
+}
+
+#[cfg(windows)]
+fn program_in_impl(dir: &Path, name: &str) -> Option<PathBuf> {
+    // .exe 优先（原生程序），其次 .cmd / .bat（npm / pnpm / dsh 都是这种）。
+    // 无扩展名的 `npm` 是给 sh 用的文本脚本，凑上去只会得到 error 193。
+    ["exe", "cmd", "bat"]
+        .iter()
+        .map(|ext| dir.join(format!("{name}.{ext}")))
+        .find(|candidate| is_executable(candidate))
+}
+
+#[cfg(not(windows))]
+fn program_in_impl(dir: &Path, name: &str) -> Option<PathBuf> {
+    let candidate = dir.join(name);
+    is_executable(&candidate).then_some(candidate)
+}
+
 /// 只在给定目录里找。
 #[must_use]
 pub fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    dirs.iter()
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
+    dirs.iter().find_map(|dir| program_in(dir, name))
 }
 
 /// 只在 `PATH` 里找。
 #[must_use]
 pub fn find_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
+    std::env::split_paths(&path).find_map(|dir| program_in(&dir, name))
+}
+
+/// 把程序名解析成能直接 spawn 的路径（Windows 上会补出 `.cmd`）。
+/// 找不到就原样返回名字，让调用方的 `spawn` 报出它自己的错误。
+#[must_use]
+pub fn resolve_program(name: &str) -> PathBuf {
+    find_in_path(name).unwrap_or_else(|| PathBuf::from(name))
 }
 
 /// 在 `extra` 目录（优先）和 `PATH` 里找可执行文件。
