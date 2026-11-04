@@ -118,6 +118,10 @@ fn take_token(rest: &mut &str) -> Option<String> {
 /// 杀掉孤儿宿主，返回清掉的数量。
 ///
 /// 只动「确认是孤儿」的进程：`current` 那个（壳自己连着的）永远不碰。
+///
+/// 非 unix 平台（Windows）没有 `ps` 也没有 POSIX 信号：扫不到、也不杀，直接返回 0，
+/// 由用户在任务管理器里关。
+#[cfg(unix)]
 pub fn reap(current: Option<u32>) -> usize {
     let shell = std::process::id();
     let mut killed = 0;
@@ -129,22 +133,14 @@ pub fn reap(current: Option<u32>) -> usize {
             "dsh-desktop: 清理孤儿 dsh {}（ppid {}，已运行 {}）",
             proc.pid, proc.ppid, proc.uptime
         );
-        #[cfg(unix)]
-        {
-            // 宿主是独立进程组（组号 = pid），连组一起发，跟着的子进程也走。
-            unsafe {
-                if libc::kill(-(proc.pid as libc::pid_t), libc::SIGTERM) != 0 {
-                    libc::kill(proc.pid as libc::pid_t, libc::SIGTERM);
-                }
+        // 宿主是独立进程组（组号 = pid），连组一起发，跟着的子进程也走。
+        unsafe {
+            if libc::kill(-(proc.pid as libc::pid_t), libc::SIGTERM) != 0 {
+                libc::kill(proc.pid as libc::pid_t, libc::SIGTERM);
             }
-            killed += 1;
         }
-        #[cfg(not(unix))]
-        {
-            let _ = proc;
-        }
+        killed += 1;
     }
-    #[cfg(unix)]
     if killed > 0 {
         // 给它们一点时间退：界面紧接着会重扫，太快会看到「还在」。
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -158,6 +154,11 @@ pub fn reap(current: Option<u32>) -> usize {
         }
     }
     killed
+}
+
+#[cfg(not(unix))]
+pub fn reap(_current: Option<u32>) -> usize {
+    0
 }
 
 #[cfg(test)]

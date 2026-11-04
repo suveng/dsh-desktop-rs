@@ -784,6 +784,8 @@ fn isolate_webview_storage() -> std::path::PathBuf {
 }
 
 /// 应用自身的 bundle id（与 `packaging/macos/bundle.sh` 的 `CFBundleIdentifier` 一致）。
+/// 只有 macOS 的 cookie 清理用得到；不加门控会让 Linux / Windows 的 `-D warnings` 报 dead_code。
+#[cfg(target_os = "macos")]
 const BUNDLE_ID: &str = "dev.suveng.dsh-desktop";
 
 /// macOS 的 WKWebView 不受 XDG 隔离：cookie 落在
