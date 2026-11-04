@@ -2,7 +2,10 @@ name: release-reminder
 
 # 每次 push 到 main 检查：Cargo.toml 的版本是否已经有对应的 vX.Y.Z tag。
 # 没打 tag 不会让流水线失败，但会在 Actions 里报警告、写 job summary，
-# 并开一个（同一版本只开一次的）issue 提醒发布。
+# 并开一个（同一版本只开一次的）issue 提醒发布；版本发布齐了就把这些 issue 自动关掉。
+#
+# 发版请走 `bash scripts/release.sh <版本号>`：它会先推 tag 再推 main，
+# 这样本次检查看到的就是「已发布」，不会再刷告警/新 issue。
 on:
   push:
     branches: [main]
@@ -32,10 +35,24 @@ jobs:
             echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           } >> "$GITHUB_OUTPUT"
 
+      # 已经发过版（tag 齐了）就把历史提醒关掉，别留着一堆 open issue 一直发通知。
+      - name: 已发布就关掉旧提醒
+        if: steps.check.outputs.status == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue list --state open --limit 100 --json number,title \
+            --jq '.[] | select(.title | startswith("发布 v")) | .number' |
+          while read -r number; do
+            [ -n "${number}" ] || continue
+            echo "关闭提醒 issue #${number}"
+            gh issue close "${number}" --comment "已发布，自动关闭。"
+          done
+
       - name: 在 Actions 里报警告
         if: steps.check.outputs.status != '0'
         run: |
-          echo "::warning title=版本未发布::Cargo.toml 的 v${{ steps.check.outputs.version }} 还没有 tag，确认发布时请打 tag"
+          echo "::warning title=版本未发布::Cargo.toml 的 v${{ steps.check.outputs.version }} 还没有 tag，确认发布时请用 bash scripts/release.sh ${{ steps.check.outputs.version }}"
 
       - name: 开提醒 issue（同一版本只开一次）
         if: steps.check.outputs.status == '1'

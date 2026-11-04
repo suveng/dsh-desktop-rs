@@ -26,6 +26,11 @@ pub const RECOMMENDED: &[RecommendedPlugin] = &[
         blurb: "跨会话记住偏好与结论，下次对话自动带回来",
     },
     RecommendedPlugin {
+        name: "billion-context",
+        title: "上下文压缩",
+        blurb: "长会话自动压缩历史，省 token 也不丢线索",
+    },
+    RecommendedPlugin {
         name: "suveng-dsh-plugin-mcp-manager",
         title: "MCP 管理",
         blurb: "在界面里增删改 MCP 服务器，不用手写配置",
@@ -66,7 +71,11 @@ mod tests {
         assert_eq!(unique.len(), names.len(), "推荐清单里有重复包名");
         for name in &names {
             assert!(is_recommended(name));
-            assert!(name.contains('/') || name.starts_with("dsh-") || name.starts_with("suveng-"));
+            // 只要是个规矩的 npm 包名即可（`billion-context` 这类中性名字也收）。
+            assert!(
+                !name.is_empty() && !name.contains(|c: char| c.is_whitespace() || c.is_uppercase()),
+                "包名不像 npm 名：{name}"
+            );
         }
     }
 

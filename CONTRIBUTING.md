@@ -37,16 +37,28 @@ Conventional Commits：`feat:` / `fix:` / `docs:` / `chore:` / `refactor:`。
 
 **规则：改版本就是发布的一部分——确认要发的那次改动里，tag 必须一起打上，不允许「先改版本、之后想起来再发」。**
 
-确认发布时按顺序执行：
+确认发布时用一条命令（推荐）：
+
+```bash
+bash scripts/release.sh 0.1.13     # 升版本 → 提交 → 打 tag → 先推 tag 再推 main
+```
+
+它做四件事：改 `Cargo.toml` 的两处版本串、`cargo metadata` 刷 `Cargo.lock`、提交
+`chore(release): X.Y.Z`、`git tag -a vX.Y.Z`，然后**先推 tag、再推 main**。
+顺序是刻意的：`release-reminder` 在 push main 时检查版本是否有 tag，
+反过来的话中间那一小段时间就会被判定「未发布」，于是刷一条告警、开一个提醒 issue。
+
+手工发布（顺序必须是 tag 在前）：
 
 ```bash
 bash scripts/check-release-tag.sh          # 先确认是否已经漏了
 git tag -a vX.Y.Z -m "dsh-desktop X.Y.Z"   # tag 与 Cargo.toml 版本必须相同
-git push origin vX.Y.Z
+git push origin vX.Y.Z                     # 先推 tag
+git push origin main                       # 再推 main
 ```
 
 - `release.yml` 只由 `v*` tag 触发：先 `verify`（fmt / clippy / test / build / smoke），再并行出 Linux（deb / AppImage / tar.gz）、macOS、Windows 产物，最后建 Release。手动 dispatch **只构建、不发布**。
-- `.github/workflows/release-reminder.yml` 每次 push 到 main 都会跑 `scripts/check-release-tag.sh`：版本没有 tag 时在 Actions 里报警告、写 job summary，并开一个「同一版本只开一次」的 issue 提醒。它不会让流水线变红——发不发由人决定。
+- `.github/workflows/release-reminder.yml` 每次 push 到 main 都会跑 `scripts/check-release-tag.sh`：版本没有 tag 时在 Actions 里报警告、写 job summary，并开一个「同一版本只开一次」的 issue 提醒；版本 tag 齐了就把所有 `发布 v*` 的 open issue 自动关掉。它不会让流水线变红——发不发由人决定。
 - tag 打错了（打在了改版本之前，或指向的提交版本不对）：删掉重打
 
   ```bash
