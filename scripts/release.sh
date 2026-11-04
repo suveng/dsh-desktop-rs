@@ -73,8 +73,12 @@ path.write_text(updated)
 print(f"改了 {count} 处版本号")
 PY
 
-# 让 Cargo.lock 里的内部 crate 一并跟上（不联网、只改本地元数据）。
-cargo metadata --no-deps --format-version 1 >/dev/null
+# 让 Cargo.lock 里的内部 crate 一并跟上。注意不能用 `cargo metadata --no-deps`：
+# 它不解析依赖图，lock 里的 version 根本不会变，于是 release.yml 的
+# `cargo build --locked` 直接报 "cannot update the lock file because --locked was passed"。
+cargo update --workspace --offline >/dev/null
+# 兜底校验：lock 过期时这里会失败，别把坏锁提交上去。
+cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
 git add Cargo.toml Cargo.lock
 git commit -q -m "chore(release): ${version}"
