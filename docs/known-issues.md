@@ -57,3 +57,47 @@ WebKitGTK 也就不推进 CSS 动画时钟。于是子元素停死在 `from` 帧
 以上五条都是"看起来相关就动手"，没有先建立可判定真假的观测。
 一条 devtools 元素面板（尺寸 `100×20`、`data-menu-phase="enter"`）就同时排除了布局、挂载、裁剪三类原因，
 把范围锁到计算样式/动画上。下一步永远应该是：**尺寸对了没有 → 计算样式是什么 → 动画/过渡在推进没有**。
+
+## 2. 壳重建的 profile 依赖链到旧 pnpm store，插件页更新永久失败（待修）
+
+### 症状
+
+装完壳（v0.1.14，2026-11-04）后，dsh 插件页点「更新」一直失败，只能看到
+`operation-error`。`~/.dsh/profiles/web/.plugin-manager/logs/operation-*/pnpm.log` 里是：
+
+```
+[ERR_PNPM_UNEXPECTED_STORE] Unexpected store location
+The dependencies at "/home/suveng/.dsh/profiles/web/node_modules" are currently linked
+from the store at "/home/suveng/.pnpm-store/v11".
+pnpm now wants to use the store at "/home/suveng/.local/share/pnpm/store/v11" to link dependencies.
+```
+
+### 根因
+
+壳的 `RepairDeps`（`crates/bin/src/onboard.rs:646`，与 `crates/setup/src/profiles.rs:335`）在 profile 里跑
+`pnpm install --prefer-offline`，它继承壳进程环境（`crates/setup/src/install.rs:85-101` 只 `cmd.env()` 叠加
+proxy 与 `npm_config_registry`）。那次执行把 `node_modules` 写成了硬链自旧 store `~/.pnpm-store/v11`
+（`.modules.yaml` 的 `storeDir` 与 `prunedAt` 可证；inode 溯源亦命中旧 store 的 `files/0f/af8aac…`），
+而本机当前 pnpm（v11.21.0）解析到 `~/.local/share/pnpm/store/v11`，两边不一致，之后任何
+`pnpm add` 都被 store 检查拦下。`needs_deps()` 只看 `node_modules` 是否存在，看不出这个矛盾。
+
+附带第二个坑：那次 install 还在 `pnpm-workspace.yaml` 里留下未决占位符
+`allowBuilds: protobufjs: set this to true or false`，使它之后的每次 install 都以
+`ERR_PNPM_IGNORED_BUILDS` 直接退出。
+
+### 归属
+
+| 层次 | 结论 |
+|---|---|
+| dsh / 插件页 / 市场 | 无责。它们只是 `pnpm add` 的使用者，拿到的已是一个自相矛盾的 profile |
+| pnpm | 行为正确：跨 store 不许混链 |
+| 本壳 | 有责，尚未修。profile 是壳创建/接管的，依赖状态由壳负责 |
+
+### 修法
+
+未实现。需求与验收见 [`requirement-profile-deps-pnpm-store.md`](requirement-profile-deps-pnpm-store.md)：
+重建前对齐 store（不一致就 `CI=true pnpm install` 重装）、`allowBuilds` 占位符定值、
+失败可见且日志落盘、`needs_deps()` 把 store 不一致也视为待修复。
+
+用户机器上的临时处置（不属于修复）：手工 `CI=true pnpm install --prefer-offline` +
+`pnpm add dsh-plugin-feishu@0.7.0`，profile 已回到新 store。
