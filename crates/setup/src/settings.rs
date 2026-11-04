@@ -309,13 +309,15 @@ mod tests {
     #[test]
     fn extra_path_dirs_expand_tilde_and_skip_blanks() {
         let home = PathBuf::from("/Users/example");
-        let mut settings = Settings::default();
-        settings.extra_path = vec![
-            "  ".to_owned(),
-            "~/bin".to_owned(),
-            "~".to_owned(),
-            "/opt/tool/bin".to_owned(),
-        ];
+        let settings = Settings {
+            extra_path: vec![
+                "  ".to_owned(),
+                "~/bin".to_owned(),
+                "~".to_owned(),
+                "/opt/tool/bin".to_owned(),
+            ],
+            ..Default::default()
+        };
         assert_eq!(
             settings.extra_path_dirs(&home),
             vec![
@@ -328,9 +330,13 @@ mod tests {
 
     #[test]
     fn host_env_round_trips_through_json() {
-        let mut settings = Settings::default();
-        settings.extra_path = vec!["~/bin".to_owned()];
-        settings.env.insert("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned());
+        let mut settings = Settings {
+            extra_path: vec!["~/bin".to_owned()],
+            ..Default::default()
+        };
+        settings
+            .env
+            .insert("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned());
         let text = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert_eq!(back, settings);

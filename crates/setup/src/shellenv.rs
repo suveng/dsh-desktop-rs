@@ -194,7 +194,14 @@ mod tests {
             .into_iter()
             .map(|dir| {
                 dir.file_name()
-                    .map(|_| dir.parent().unwrap().file_name().unwrap().to_string_lossy().to_string())
+                    .map(|_| {
+                        dir.parent()
+                            .unwrap()
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .to_string()
+                    })
                     .unwrap_or_default()
             })
             .collect();
