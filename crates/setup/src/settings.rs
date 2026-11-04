@@ -126,6 +126,9 @@ pub struct Settings {
     pub extra_path: Vec<String>,
     /// 额外注入宿主的环境变量（`KEY` → `VALUE`），同名项覆盖进程环境。
     pub env: BTreeMap<String, String>,
+    /// 引导页勾选的推荐插件（包名）。`None` = 还没选过，等同「全部推荐项」。
+    /// 存 `None` 而不是空表，是为了区分「默认全选」和「用户主动全部取消」。
+    pub plugins: Option<Vec<String>>,
 }
 
 impl Default for Settings {
@@ -140,11 +143,25 @@ impl Default for Settings {
             history: Vec::new(),
             extra_path: Vec::new(),
             env: BTreeMap::new(),
+            plugins: None,
         }
     }
 }
 
 impl Settings {
+    /// 要预装的插件：没选过就是全部推荐项；选过的只保留清单里的名字。
+    #[must_use]
+    pub fn selected_plugins(&self) -> Vec<String> {
+        match &self.plugins {
+            Some(list) => list
+                .iter()
+                .filter(|name| crate::plugins::is_recommended(name))
+                .cloned()
+                .collect(),
+            None => crate::plugins::recommended_names(),
+        }
+    }
+
     /// 目标 dsh 版本（空值回落默认）。
     #[must_use]
     pub fn target_dsh_version(&self) -> &str {
@@ -304,6 +321,38 @@ mod tests {
         assert!(settings.extra_path.is_empty());
         assert!(settings.env.is_empty());
         assert!(settings.host_env().is_empty());
+    }
+
+    #[test]
+    fn plugins_default_to_every_recommendation() {
+        let settings = Settings::default();
+        assert_eq!(settings.plugins, None);
+        assert_eq!(
+            settings.selected_plugins(),
+            crate::plugins::recommended_names()
+        );
+    }
+
+    #[test]
+    fn explicit_plugin_choice_wins_and_unknown_names_are_dropped() {
+        let mut settings = Settings {
+            plugins: Some(vec!["dsh-plugin-feishu".to_owned(), "left-pad".to_owned()]),
+            ..Settings::default()
+        };
+        assert_eq!(settings.selected_plugins(), vec!["dsh-plugin-feishu"]);
+        // 全部取消：空列表 ≠ 没选过，不能回落到「全选」。
+        settings.plugins = Some(Vec::new());
+        assert!(settings.selected_plugins().is_empty());
+    }
+
+    #[test]
+    fn older_settings_files_still_load() {
+        let settings: Settings = serde_json::from_str(r#"{"profile":"web"}"#).unwrap();
+        assert_eq!(settings.plugins, None);
+        assert_eq!(
+            settings.selected_plugins(),
+            crate::plugins::recommended_names()
+        );
     }
 
     #[test]

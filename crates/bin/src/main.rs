@@ -520,6 +520,17 @@ fn launch_spec(cli: &Cli, settings: &Settings) -> LaunchSpec {
         "PATH",
         dsh_setup::shellenv::compose_path(&bins, Some(base.as_os_str())).to_string_lossy(),
     );
+    // 宿主的 XDG 不能跟着 webview 的隔离目录走：pnpm 的 store 就在
+    // `$XDG_DATA_HOME/pnpm/store` 下，而那个目录退出时会被 `wipe_webview_storage()`
+    // 整个删掉 —— 于是每次重装插件都撞 `ERR_PNPM_UNEXPECTED_STORE`（引导页预装插件、
+    // 插件市场里点安装都会失败）。钉回各平台自己的默认位置，store 才能跨会话复用。
+    #[cfg(target_os = "macos")]
+    let (data_home, cache_home) = (home.join("Library"), home.join("Library/Caches"));
+    #[cfg(not(target_os = "macos"))]
+    let (data_home, cache_home) = (home.join(".local/share"), home.join(".cache"));
+    spec = spec
+        .env("XDG_DATA_HOME", data_home.to_string_lossy())
+        .env("XDG_CACHE_HOME", cache_home.to_string_lossy());
     for (key, value) in settings.host_env() {
         spec = spec.env(key, value);
     }
@@ -612,6 +623,7 @@ fn run_onboard_selftest(cli: &Cli) -> i32 {
     onboard.open(&candidates, None);
     println!("ONBOARD ENV {}", onboard.view()["env"]);
     println!("ONBOARD HOSTS {}", onboard.view()["hosts"]);
+    println!("ONBOARD PLUGINS {}", onboard.view()["plugins"]);
     if !onboard.env_ready() {
         onboard.handle(
             &serde_json::json!({"kind": "onboard", "cmd": "install"}),
@@ -2228,5 +2240,33 @@ mod asset_tests {
         assert!(ONBOARDING.contains("\"scan-hosts\""), "要有重新扫描按钮");
         assert!(ONBOARDING.contains("\"reap-hosts\""), "要有清理孤儿按钮");
         assert!(ONBOARDING.contains("S.hosts"), "快照要带 hosts 字段");
+    }
+
+    #[test]
+    fn the_wizard_offers_recommended_plugins() {
+        assert!(ONBOARDING.contains("panelPlugins"), "要有推荐插件面板");
+        assert!(
+            ONBOARDING.contains("data-field=\"plugins\""),
+            "勾选框要把选择交给壳"
+        );
+        assert!(
+            ONBOARDING.contains("[\"plugins\", \"推荐插件\"]"),
+            "导航里要能看到这一步"
+        );
+        assert!(ONBOARDING.contains("S.plugins"), "快照要带 plugins 字段");
+    }
+
+    #[test]
+    fn the_log_panel_repaints_when_collapsed() {
+        // 只用行数当重绘键的话，点「收起」不改变行数 → 提前 return → `display` 不更新，
+        // 用户看到的就是「点收起没反应」（0.1.6 的实际报障）。
+        assert!(
+            ONBOARDING.contains(r#"const key = lines.length + "|" + (S.log_open ? 1 : 0);"#),
+            "日志面板的重绘键要带展开状态"
+        );
+        assert!(
+            !ONBOARDING.contains("lines.length === lastLogLen"),
+            "不要再用行数单独当键"
+        );
     }
 }

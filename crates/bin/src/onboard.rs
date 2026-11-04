@@ -76,6 +76,7 @@ pub enum Screen {
     Proxy,
     Version,
     Profile,
+    Plugins,
     Progress,
     Done,
 }
@@ -87,6 +88,7 @@ impl Screen {
             Self::Proxy => "proxy",
             Self::Version => "version",
             Self::Profile => "profile",
+            Self::Plugins => "plugins",
             Self::Progress => "progress",
             Self::Done => "done",
         }
@@ -98,6 +100,7 @@ impl Screen {
             "proxy" => Self::Proxy,
             "version" => Self::Version,
             "profile" => Self::Profile,
+            "plugins" => Self::Plugins,
             "progress" => Self::Progress,
             "done" => Self::Done,
             _ => return None,
@@ -182,6 +185,11 @@ enum Step {
         version: String,
         scope: InstallScope,
     },
+    /// dsh 装完之后的推荐插件：用的是 dsh 自己的 `plugin add`（内部转发 pnpm）。
+    InstallPlugins {
+        profile: String,
+        packages: Vec<String>,
+    },
     RepairDeps {
         profile: String,
     },
@@ -212,6 +220,9 @@ impl Step {
                 _ => format!("安装 dsh {version}"),
             },
             Self::RepairDeps { profile } => format!("重建 profile「{profile}」的依赖"),
+            Self::InstallPlugins { packages, .. } => {
+                format!("预装推荐插件（{} 个）", packages.len())
+            }
             Self::Backup { profile } => format!("备份 profile「{profile}」"),
             Self::Restore { profile, .. } => format!("还原 profile「{profile}」"),
             Self::Import { name, .. } => format!("导入 profile「{name}」"),
@@ -521,6 +532,14 @@ impl Onboard {
                     self.rev = self.rev.wrapping_add(1);
                     return Effect::None;
                 }
+                // 插件装不上也不能抦住主流程：dsh 已经能用，用户之后还能在插件市场里补。
+                if matches!(step, Step::InstallPlugins { .. }) {
+                    push_log(&mut self.log, "warn", format!("预装推荐插件失败：{err}"));
+                    self.notice =
+                        Some("推荐插件没装上，dsh 本身没事，可以稍后从插件市场重试".to_owned());
+                    self.rev = self.rev.wrapping_add(1);
+                    return Effect::None;
+                }
                 // 全局装不上（权限）时自动退到用户前缀 —— 这就是「优先全局」的兜底。
                 if let Step::InstallDsh {
                     version,
@@ -605,6 +624,14 @@ impl Onboard {
                 self.refresh(candidates);
             }
             Step::RepairDeps { .. } => {}
+            Step::InstallPlugins { packages, .. } => {
+                self.refresh(candidates);
+                push_log(
+                    &mut self.log,
+                    "ok",
+                    format!("已预装 {} 个推荐插件", packages.len()),
+                );
+            }
         }
         if self.pending.is_empty() && !self.busy() {
             self.rev = self.rev.wrapping_add(1);
@@ -682,6 +709,33 @@ impl Onboard {
                     Running::Idle
                 }
             },
+            Step::InstallPlugins { profile, packages } => {
+                // 所有东西都交给 dsh 自己做：它就是 pnpm 的转发层，而且会顺手把插件登记到
+                // profile 的 `dsh.profile.bundles`（手写 package.json 很容易漏这一步）。
+                let program = self.env.dsh.as_ref().map(|runtime| runtime.program.clone());
+                let Some(program) = program else {
+                    push_log(&mut self.log, "warn", "找不到 dsh，跳过推荐插件".to_owned());
+                    return;
+                };
+                let mut args = vec![
+                    "plugin".to_owned(),
+                    "--profile".to_owned(),
+                    profile,
+                    "add".to_owned(),
+                ];
+                args.extend(packages);
+                match Job::spawn(&program, &args, &env, None) {
+                    Ok(job) => Running::Job { job, step },
+                    Err(err) => {
+                        push_log(
+                            &mut self.log,
+                            "warn",
+                            format!("启动 dsh plugin 失败：{err}，跳过推荐插件"),
+                        );
+                        Running::Idle
+                    }
+                }
+            }
             Step::RepairDeps { profile } => {
                 let dir = paths.profiles_root().join(&profile);
                 match Job::spawn(
@@ -1106,6 +1160,21 @@ impl Onboard {
         if object.contains_key("profile") {
             self.settings.profile = text(object.get("profile"));
         }
+        if let Some(values) = object.get("plugins") {
+            // 只认推荐清单里的名字：手改 settings.json 不该能往用户机器上装任意包。
+            self.settings.plugins = Some(
+                values
+                    .as_array()
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .filter(|name| dsh_setup::plugins::is_recommended(name))
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            );
+        }
         if object.contains_key("extra_path") {
             self.settings.extra_path = text(object.get("extra_path"))
                 .lines()
@@ -1169,6 +1238,14 @@ impl Onboard {
             version,
             scope: self.settings.install_scope,
         });
+        // 插件必须排在 dsh 之后：命令本身就是刚装好的 dsh 提供的。
+        let packages = self.settings.selected_plugins();
+        if !packages.is_empty() {
+            self.pending.push_back(Step::InstallPlugins {
+                profile: self.settings.target_profile().to_owned(),
+                packages,
+            });
+        }
         self.pending.push_back(Step::Reprobe);
         self.refresh(candidates);
         self.rev = self.rev.wrapping_add(1);
@@ -1215,6 +1292,7 @@ impl Onboard {
                 })
             })
             .collect();
+        let selected_plugins = self.settings.selected_plugins();
         json!({
             "rev": self.rev,
             "screen": self.screen.key(),
@@ -1258,6 +1336,7 @@ impl Onboard {
                     InstallScope::User => "user",
                 },
                 "profile": self.settings.target_profile(),
+                "plugins": self.settings.selected_plugins(),
                 "host_env": {
                     "extra_path": self.settings.extra_path.join("\n"),
                     "env": self.settings.env.iter()
@@ -1267,6 +1346,15 @@ impl Onboard {
                 },
             },
             "versions": self.versions,
+            "plugins": {
+                "recommended": dsh_setup::plugins::RECOMMENDED.iter().map(|item| json!({
+                    "name": item.name,
+                    "title": item.title,
+                    "blurb": item.blurb,
+                    "selected": selected_plugins.iter().any(|name| name == item.name),
+                })).collect::<Vec<_>>(),
+                "selected": selected_plugins,
+            },
             "hosts": {
                 "shell": std::process::id(),
                 "current": self.hosts.iter()
@@ -2151,6 +2239,72 @@ mod tests {
         assert!(paths.data.is_dir(), "数据目录要建出来");
         assert!(paths.install_downloads().is_dir(), "downloads 目录要建出来");
         assert!(paths.backups().is_dir(), "备份目录要建出来");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_queues_selected_plugins_after_dsh() {
+        let (paths, root) = scratch("plugins-queue");
+        let mut onboard = fresh(&paths);
+        onboard.settings.plugins = Some(vec!["dsh-plugin-feishu".to_owned()]);
+        onboard.handle(&json!({"kind": "onboard", "cmd": "install"}), &[]);
+
+        let queue: Vec<String> = onboard.pending.iter().map(Step::label).collect();
+        let dsh_at = queue
+            .iter()
+            .position(|label| label.starts_with("安装 dsh"))
+            .expect("队列里要有 dsh");
+        let plugins_at = queue
+            .iter()
+            .position(|label| label.contains("预装推荐插件（1 个）"))
+            .expect("选中的插件要进队列");
+        assert!(
+            dsh_at < plugins_at,
+            "插件必须排在 dsh 后面（命令是 dsh 提供的）：{queue:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unchecking_every_plugin_ships_nothing_extra() {
+        let (paths, root) = scratch("plugins-none");
+        let mut onboard = fresh(&paths);
+        onboard.settings.plugins = Some(Vec::new());
+        onboard.handle(&json!({"kind": "onboard", "cmd": "install"}), &[]);
+        assert!(
+            !onboard
+                .pending
+                .iter()
+                .any(|step| matches!(step, Step::InstallPlugins { .. })),
+            "全部取消勾选就不该预装"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_lists_recommended_plugins_as_selected() {
+        let (paths, root) = scratch("plugins-view");
+        let onboard = fresh(&paths);
+        let view = onboard.view();
+        let recommended = view["plugins"]["recommended"]
+            .as_array()
+            .expect("快照要带推荐清单");
+        assert_eq!(recommended.len(), dsh_setup::plugins::RECOMMENDED.len());
+        assert!(
+            recommended
+                .iter()
+                .all(|item| item["selected"].as_bool() == Some(true)),
+            "默认全选"
+        );
+        assert_eq!(
+            view["plugins"]["selected"].as_array().map(Vec::len),
+            Some(recommended.len())
+        );
+        // 环境页之外的界面也要能读到完整选择（设置面板回显）。
+        assert_eq!(
+            view["settings"]["plugins"].as_array().map(Vec::len),
+            Some(recommended.len())
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

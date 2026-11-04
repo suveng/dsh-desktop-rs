@@ -105,7 +105,9 @@
 <script>
   let S = null;
   let lastPanel = "";
-  let lastLogLen = -1;
+  // 日志面板的重绘键要带上"展开/收起"状态：只用行数做键的话，点「收起」行数没变，
+  // 提前 return 会把 `pre.style.display` 一起跳过 —— 表现就是按钮点不动。
+  let lastLogKey = "";
   let acked = false;
 
   function send(cmd, extra) {
@@ -149,7 +151,7 @@
       (e.dsh_home ? ' <span class="pill">' + esc(e.dsh_home) + '</span>' : ''));
   }
 
-  const STEPS = [["env", "环境"], ["proxy", "代理"], ["version", "版本"], ["profile", "Profile"], ["progress", "安装"], ["done", "完成"]];
+  const STEPS = [["env", "环境"], ["proxy", "代理"], ["version", "版本"], ["profile", "Profile"], ["plugins", "推荐插件"], ["progress", "安装"], ["done", "完成"]];
   const ORDER = STEPS.map(([key]) => key);
   // 已经走到过的最远一步：走过的步骤可以点回去改（比如装到一半回去调代理）。
   let furthest = 0;
@@ -308,6 +310,19 @@
       "</div></div>";
   }
 
+  function panelPlugins() {
+    const list = (S.plugins || {}).recommended || [];
+    const rows = list.map((p) =>
+      '<label class="choice"><input type="checkbox" data-field="plugins" data-value="' + esc(p.name) + '"' +
+      (p.selected ? " checked" : "") + "><span><b>" + esc(p.title) + "</b><small>" + esc(p.blurb) +
+      " · " + esc(p.name) + "</small></span></label>").join("") ||
+      '<p class="hint">这一版没有内置推荐插件。</p>';
+    const picked = list.filter((p) => p.selected).length;
+    return '<div class="card"><div class="row"><span class="name">预装插件</span><span class="val">已选 ' + picked + " / " + list.length + "</span></div>" +
+      '<div class="choices" style="margin-top:8px">' + rows + "</div>" +
+      '<p class="hint">装 dsh 时一并写进 profile「' + esc((S.settings || {}).profile) + "」，走的是 dsh 自己的 plugin 命令（内部转发 pnpm）。取消勾选就不装，之后也能在插件市场再加。</p></div>";
+  }
+
   function panelProgress() {
     let body = "";
     if (S.error) {
@@ -334,6 +349,7 @@
       case "proxy": return panelProxy();
       case "version": return panelVersion();
       case "profile": return panelProfile();
+      case "plugins": return panelPlugins();
       case "progress": return panelProgress();
       case "done": return panelDone();
       default: return panelEnv();
@@ -355,6 +371,9 @@
       b.push(btn("goto:profile", "下一步", "primary", busy));
     } else if (S.screen === "profile") {
       b.push(btn("goto:version", "上一步", "", busy));
+      b.push(btn("goto:plugins", "下一步", "primary", busy));
+    } else if (S.screen === "plugins") {
+      b.push(btn("goto:profile", "上一步", "", busy));
       b.push(btn("install", "开始安装", "primary", busy));
     } else if (S.screen === "progress") {
       if (busy) b.push(btn("cancel", "取消", "danger", false));
@@ -397,8 +416,9 @@
   function renderLog() {
     const pre = document.getElementById("log");
     const lines = S.log || [];
-    if (lines.length === lastLogLen) return;
-    lastLogLen = lines.length;
+    const key = lines.length + "|" + (S.log_open ? 1 : 0);
+    if (key === lastLogKey) return;
+    lastLogKey = key;
     pre.innerHTML = lines.map((l) => {
       const cls = l.kind === "err" ? "err" : (l.kind === "warn" ? "warn" : (l.kind === "info" ? "info" : ""));
       return '<span class="' + cls + '">' + esc(l.text) + "</span>";
@@ -435,15 +455,27 @@
 
   function collectSettings() {
     const out = {};
+    let pluginsSeen = false;
     document.querySelectorAll("[data-field]").forEach((el) => {
       const key = el.dataset.field;
       if (key === "import_name") return;
       if (el.type === "radio") {
         if (el.checked) out[key] = el.dataset.value;
-      } else {
-        out[key] = el.value;
+        return;
       }
+      if (el.type === "checkbox") {
+        // 多选必须每次都把完整数组发回去：全部取消勾选时也要发空数组，
+        // 否则壳那边只看到「这次没提到 plugins」，会保留上一次的选择。
+        if (key === "plugins") {
+          pluginsSeen = true;
+          out.plugins = out.plugins || [];
+          if (el.checked) out.plugins.push(el.dataset.value);
+        }
+        return;
+      }
+      out[key] = el.value;
     });
+    if (pluginsSeen && !out.plugins) out.plugins = [];
     return out;
   }
 

@@ -6,6 +6,7 @@
 pub mod envcheck;
 pub mod install;
 pub mod node;
+pub mod plugins;
 pub mod profiles;
 pub mod settings;
 pub mod shellenv;
@@ -14,5 +15,6 @@ pub mod version;
 
 pub use envcheck::{DshRuntime, NodeRuntime, Source};
 pub use install::{Job, JobEvent, JobOutcome, Stream};
+pub use plugins::RecommendedPlugin;
 pub use settings::{InstallScope, Proxy, Settings};
 pub use version::Version;
