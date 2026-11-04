@@ -10,14 +10,27 @@ cd "$ROOT"
 
 APP=dsh-desktop
 VERSION=${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}
-ARCH=$(uname -m)
 APP_DIR="$ROOT/target/package/$APP.app"
 DIST="$ROOT/dist"
+
+# 二进制来源：默认 target/release，CI 可以传一个已经 lipo 好的通用版过来。
+BIN=${BIN:-$ROOT/target/release/$APP}
+[ -x "$BIN" ] || { echo "找不到可执行文件 $BIN，先 cargo build --release -p dsh-desktop" >&2; exit 1; }
+# 产物命名用二进制里真实包含的架构，而不是跑脚本这台机器的架构：
+# universal 就叫 universal（Intel + Apple silicon 同一个包）。
+if [ -z "${ARCH:-}" ]; then
+  archs=$(lipo -archs "$BIN" 2>/dev/null || true)
+  case "$archs" in
+    "x86_64 arm64"|"arm64 x86_64") ARCH=universal ;;
+    "") ARCH=$(uname -m) ;;
+    *) ARCH=$(printf '%s' "$archs" | tr ' ' '-') ;;
+  esac
+fi
 
 rm -rf "$APP_DIR" "$DIST"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$DIST"
 
-install -m755 "target/release/$APP" "$APP_DIR/Contents/MacOS/$APP"
+install -m755 "$BIN" "$APP_DIR/Contents/MacOS/$APP"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
