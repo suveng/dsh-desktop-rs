@@ -31,12 +31,34 @@ pub fn arch() -> &'static str {
     }
 }
 
-/// `node-v24.13.0-linux-x64.tar.gz`
+/// 这台机器在 nodejs.org 上的平台名（资产文件名用）。
 ///
-/// 用 `.tar.gz` 而不是 `.tar.xz`：解压只需要 tar + gzip，不依赖 xz。
+/// 官方分发的命名是：`linux-x64.tar.gz` / `darwin-arm64.tar.gz` / `win-x64.zip`。
+/// 以前这里写死了 `linux`，于是 Windows 上会去下 linux 的 tar.gz 再让 `tar` 解 ——
+/// 解到一半报 `tar: Error exit delayed from previous errors`。
+#[must_use]
+pub fn platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win",
+        other => other,
+    }
+}
+
+/// 是否用的是 Windows 的 `.zip` 发行包（解压与二进制位置都和 unix 不一样）。
+#[must_use]
+pub fn uses_zip() -> bool {
+    cfg!(windows)
+}
+
+/// `node-v24.13.0-linux-x64.tar.gz` / `node-v24.13.0-win-x64.zip`
+///
+/// unix 上用 `.tar.gz` 而不是 `.tar.xz`：解压只需要 tar + gzip，不依赖 xz。
+/// Windows 只有 `.zip` 可选；Win10 1803+ 自带的 bsdtar 能直接解 zip。
 #[must_use]
 pub fn asset_name(version: &str) -> String {
-    format!("node-v{version}-linux-{}.tar.gz", arch())
+    let ext = if uses_zip() { "zip" } else { "tar.gz" };
+    format!("node-v{version}-{}-{}.{ext}", platform(), arch())
 }
 
 /// tarball 的下载地址。
@@ -70,9 +92,27 @@ pub fn version_prefix(data_dir: &Path, version: &str) -> PathBuf {
 }
 
 /// 装好的 node 的 bin 目录（要前置进 PATH 的那个）。
+///
+/// Windows 的 zip 解出来是 `node.exe` 直接放在前缀根目录（没有 `bin/`），
+/// `npm.cmd` 也在那里，所以把前缀本身当作 bin 目录。
 #[must_use]
 pub fn bin_dir(data_dir: &Path, version: &str) -> PathBuf {
-    version_prefix(data_dir, version).join("bin")
+    let prefix = version_prefix(data_dir, version);
+    if uses_zip() {
+        prefix
+    } else {
+        prefix.join("bin")
+    }
+}
+
+/// 解出来的 node 可执行文件路径（Windows 是 `node.exe`，在前缀根目录）。
+#[must_use]
+pub fn node_program(prefix: &Path) -> PathBuf {
+    if uses_zip() {
+        prefix.join("node.exe")
+    } else {
+        prefix.join("bin").join("node")
+    }
 }
 
 /// 从 `index.json` 里挑最新的 LTS 版本。
@@ -153,13 +193,15 @@ pub fn download(url: &str, dest: &Path, proxy: &[(String, String)]) -> io::Resul
     Job::spawn(Path::new("curl"), &args, proxy, None)
 }
 
-/// 解压 tarball 到 `prefix`，返回 `prefix/bin`。
+/// 解压发行包到 `prefix`。
 ///
-/// tarball 顶层是 `node-vX-linux-arch/`，用 `--strip-components=1` 去掉。
+/// 包顶层是 `node-vX-<platform>-<arch>/`，用 `--strip-components=1` 去掉。
+/// Windows 的 zip 交给系统自带的 bsdtar（`tar -xf`），不要求装 7z / Expand-Archive。
 pub fn extract(archive: &Path, prefix: &Path) -> io::Result<CommandResult> {
     fs::create_dir_all(prefix)?;
+    let flag = if uses_zip() { "-xf" } else { "-xzf" };
     let args = vec![
-        "-xzf".to_owned(),
+        flag.to_owned(),
         archive.display().to_string(),
         "-C".to_owned(),
         prefix.display().to_string(),
@@ -168,9 +210,9 @@ pub fn extract(archive: &Path, prefix: &Path) -> io::Result<CommandResult> {
     run_blocking(Path::new("tar"), &args, &[], None, Duration::from_secs(300))
 }
 
-/// 解压后检查 `bin/node` 真的能跑，并返回它的版本。
+/// 解压后检查 node 真的能跑，并返回它的版本。
 pub fn verify_extracted(prefix: &Path) -> io::Result<String> {
-    let node = prefix.join("bin").join("node");
+    let node = node_program(prefix);
     if !node.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -200,7 +242,7 @@ pub fn install(
     mut log: impl FnMut(&str),
 ) -> io::Result<PathBuf> {
     let prefix = version_prefix(data_dir, version);
-    if prefix.join("bin").join("node").exists() {
+    if node_program(&prefix).exists() {
         log(&format!("node v{version} 已存在，跳过下载"));
         return Ok(prefix);
     }
@@ -272,13 +314,24 @@ mod tests {
 
     #[test]
     fn asset_names_follow_official_scheme() {
+        // 资产名必须跟平台走：Windows 只有 .zip，unix 是 .tar.gz。
+        let name = asset_name("24.13.0");
         assert_eq!(
-            asset_name("24.13.0"),
-            format!("node-v24.13.0-linux-{}.tar.gz", arch())
+            name,
+            format!("node-v24.13.0-{}-{}.{}", platform(), arch(), {
+                if uses_zip() { "zip" } else { "tar.gz" }
+            })
+        );
+        assert!(name.starts_with("node-v24.13.0-"));
+        assert_eq!(
+            name.ends_with(".zip"),
+            cfg!(windows),
+            "只有 Windows 用 zip：{name}"
         );
         assert!(
-            tarball_url("24.13.0").ends_with("/v24.13.0/node-v24.13.0-linux-x64.tar.gz")
-                || tarball_url("24.13.0").contains("-linux-arm64.tar.gz")
+            tarball_url("24.13.0").ends_with(&format!("/v24.13.0/{name}")),
+            "{}",
+            tarball_url("24.13.0")
         );
         assert!(shasums_url("24.13.0").ends_with("/v24.13.0/SHASUMS256.txt"));
     }
@@ -324,7 +377,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dsh-setup-node-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let err = verify_extracted(&dir).unwrap_err();
-        assert!(err.to_string().contains("bin/node"));
+        let expected = if uses_zip() { "node.exe" } else { "bin/node" };
+        assert!(
+            err.to_string().contains(expected),
+            "{err} 里该提到 {expected}"
+        );
     }
 
     #[test]

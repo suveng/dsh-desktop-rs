@@ -2067,7 +2067,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(onboard.error.is_none(), "不该失败：{:?}", onboard.error);
-        let node_bin = node::bin_dir(&paths.data, version).join("node");
+        let node_bin = node::node_program(&node::version_prefix(&paths.data, version));
         assert!(node_bin.exists(), "校验通过后该解压出 node");
         assert!(
             matches!(onboard.env.node, NodeRuntime::Ready { .. }),
