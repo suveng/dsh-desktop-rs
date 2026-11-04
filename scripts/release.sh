@@ -77,8 +77,10 @@ PY
 # 它不解析依赖图，lock 里的 version 根本不会变，于是 release.yml 的
 # `cargo build --locked` 直接报 "cannot update the lock file because --locked was passed"。
 cargo update --workspace --offline >/dev/null
-# 兜底校验：lock 过期时这里会失败，别把坏锁提交上去。
-cargo metadata --locked --no-deps --format-version 1 >/dev/null
+# 兜底校验：解析整张依赖图并在 --locked 下比对 lock。
+# 注意不能带 --no-deps —— 那样只读 manifest，lock 里过期的版本条目查不出来
+# （v0.1.14 的 linux 打包就是这么挂的：Cargo.toml 0.1.14、lock 里还是 0.1.13）。
+cargo metadata --locked --format-version 1 >/dev/null
 
 git add Cargo.toml Cargo.lock
 git commit -q -m "chore(release): ${version}"
