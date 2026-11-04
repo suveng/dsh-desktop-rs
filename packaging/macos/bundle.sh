@@ -80,18 +80,24 @@ fi
 
 codesign --force --deep --options runtime --sign "$signing_identity" "$APP_DIR"
 
+# DMG 无条件产：没有证书时它照样能装（右键 → 打开），只是没法提交公证。
+# 公证是 dmg 的附加步骤，不是产出 dmg 的前提。
+DMG_STAGE="$ROOT/target/package/dmg"
+rm -rf "$DMG_STAGE" && mkdir -p "$DMG_STAGE"
+cp -R "$APP_DIR" "$DMG_STAGE/"
+# 拖拽安装习惯：dmg 里放一个 /Applications 别名。
+ln -sfn /Applications "$DMG_STAGE/Applications"
+DMG="$ROOT/target/package/$APP-$VERSION-macos-$ARCH.dmg"
+hdiutil create -volname "DeepSeek Harness" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG" >/dev/null
+cp "$DMG" "$DIST/"
+echo "built $DIST/$APP-$VERSION-macos-$ARCH.dmg"
+
 # 只有真签名 + 配了 Apple ID 才尝试公证；失败不阻断发布（但要留痕）
 if [ "$signing_identity" != "-" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
-  DMG_STAGE="$ROOT/target/package/dmg"
-  rm -rf "$DMG_STAGE" && mkdir -p "$DMG_STAGE"
-  cp -R "$APP_DIR" "$DMG_STAGE/"
-  DMG="$ROOT/target/package/$APP-$VERSION-$ARCH.dmg"
-  hdiutil create -volname "DeepSeek Harness" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG"
   echo "==> 提交公证"
-  xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+  xcrun notarytool submit "$DIST/$APP-$VERSION-macos-$ARCH.dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
     --password "$APPLE_APP_PASSWORD" --wait || echo "!! 公证失败，产物仍需右键打开"
-  xcrun stapler staple "$DMG" || true
-  cp "$DMG" "$DIST/" || true
+  xcrun stapler staple "$DIST/$APP-$VERSION-macos-$ARCH.dmg" || true
 fi
 
 ( cd "$ROOT/target/package" && zip -qry "$DIST/$APP-$VERSION-macos-$ARCH.zip" "$APP.app" )
