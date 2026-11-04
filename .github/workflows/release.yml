@@ -27,6 +27,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: { shared-key: release-verify }
       - run: cargo fmt --all --check
+      # 先查 lock 与 Cargo.toml 是否一致：linux 打包用的是 `cargo build --locked`，
+      # lock 过期会在十几分钟后的打包步骤才炸（v0.1.13 / v0.1.14 都栽在这）。
+      - name: Cargo.lock 与版本号一致
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --lib --tests
       - name: build
