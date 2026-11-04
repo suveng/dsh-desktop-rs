@@ -1393,8 +1393,10 @@ fn installed_node_versions(paths: &Paths) -> Vec<String> {
     versions
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
+    // 整套测试用 `#!/bin/sh` 假脚本驱动 node/npm/dsh，Windows 上既没有 sh 可跑，
+    // `std::os::unix` 在那边也根本不存在 —— 与 supervisor/tests/lifecycle.rs 一样整体 unix-only。
     use super::*;
 
     fn scratch(name: &str) -> (Paths, PathBuf) {
