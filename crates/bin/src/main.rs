@@ -3,6 +3,11 @@
 //! 壳只做四件事（`docs/architecture.md` D1）：拉起宿主进程、开一个 webview 加载它、
 //! 提供原生窗口能力、在它挂掉时给出可操作的诊断。UI 与协议都归上游。
 
+// Windows 上没有这行，GUI 进程会连带开一个控制台窗口，所有 eprintln! 都打到那个窗口里
+// （0.1.8 在 Windows 上的报障就是这样）。带上它以后壳不再自开控制台；从一个已有控制台
+// 启动时仍然继承那个控制台的句柄，所以 CI / 开发时的 --onboard-selftest 照样能看到输出。
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod clipboard;
 mod desktop;
 mod embed;
@@ -143,14 +148,12 @@ fn install_signal_handlers() {
 
 /// 把 stderr 接到状态目录里的日志文件。
 ///
-/// 从启动台 / 访达启动的 GUI 进程没有终端，`eprintln!` 全泺进虚空；unified log 也抳不到
+/// 从启动台 / 访达启动的 GUI 进程没有终端，`eprintln!` 全吞进虚空；unified log 也抓不到
 /// （`log show --predicate 'process == "dsh-desktop"'` 里一行都没有）。出了问题就只能猜。
-/// 这里把 fd 2 直接指向 `state_dir()/dsh-desktop.log`，所有 `eprintln!` 就自动落盘，
+/// Windows 上同理（双击 msi 装完从开始菜单启动，没有控制台）。这里把 fd 2 指向
+/// `state_dir()/dsh-desktop.log`，所有 `eprintln!` 就自动落盘，
 /// 而且「打开日志目录」按钮正好打开的就是这个目录。
-#[cfg(unix)]
 fn redirect_stderr_to_log() -> Option<std::path::PathBuf> {
-    use std::os::fd::AsRawFd;
-
     let dir = dsh_platform::state_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("dsh-desktop.log");
@@ -163,37 +166,78 @@ fn redirect_stderr_to_log() -> Option<std::path::PathBuf> {
         .append(true)
         .open(&path)
         .ok()?;
-    // SAFETY: 启动阶段、还没创建 webview 和子进程；`dup2` 之后 `file` 可以关，fd 2 独立有效。
-    unsafe {
-        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
-    }
+    attach_stderr(&file);
+    // 句柄已经交给进程（fd 2 / STD_ERROR_HANDLE），别在返回时关掉。
+    std::mem::forget(file);
     Some(path)
 }
 
-/// `MM-DD HH:MM:SS`，给日志做会话分隔用。
 #[cfg(unix)]
-fn stamp() -> String {
-    // SAFETY: `time`/`localtime_r` 都只写我们传进去的 `tm`。
+fn attach_stderr(file: &std::fs::File) {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: 启动阶段、还没创建 webview 和子进程；`dup2` 之后 fd 2 独立有效。
     unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&now, &mut tm);
-        format!(
-            "{:02}-{:02} {:02}:{:02}:{:02}",
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec
-        )
+        libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
     }
+}
+
+/// Windows 上要同时动两处：CRT 的 fd 2（子进程会继承它）和 `STD_ERROR_HANDLE`
+/// （`std::io::stderr` 每次写入都重新 `GetStdHandle`，只 dup2 不够）。
+#[cfg(windows)]
+fn attach_stderr(file: &std::fs::File) {
+    use std::os::windows::io::AsRawHandle;
+
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32; // (DWORD)-12
+    unsafe extern "system" {
+        fn SetStdHandle(which: u32, handle: *mut core::ffi::c_void) -> i32;
+    }
+
+    let handle = file.as_raw_handle() as libc::intptr_t;
+    // SAFETY: 句柄属于刚打开的文件；`open_osfhandle` 成功后这个 fd 指向同一文件，
+    // 调用方负责不让 `File` 在此之后被关闭（`mem::forget`）。
+    unsafe {
+        let fd = libc::open_osfhandle(handle, libc::O_APPEND);
+        if fd >= 0 {
+            libc::dup2(fd, 2);
+        }
+        SetStdHandle(STD_ERROR_HANDLE, handle as *mut core::ffi::c_void);
+    }
+}
+
+/// `MM-DD HH:MM:SS`，给日志做会话分隔用。
+///
+/// 自己按 UTC 算，不依赖 `localtime_r`（Windows 上没有这个函数）。
+fn stamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant 的 civil_from_days：1970-01-01 起的天数 → 年月日。
+    let z = days + 719_468;
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!(
+        "{:02}-{:02} {:02}:{:02}:{:02}",
+        month,
+        day,
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 fn main() {
     // webview 隔离会把 XDG_DATA_HOME 指到 tmpfs，先把「装 node / dsh 的目录」钉死。
     dsh_platform::pin_paths();
     // 早于任何其它输出去接日志文件，否则第一批诊断行会丢。
-    #[cfg(unix)]
     if std::env::var_os("DSH_DESKTOP_NO_LOG_FILE").is_none()
         && let Some(path) = redirect_stderr_to_log()
     {

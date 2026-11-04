@@ -1375,6 +1375,8 @@ impl Onboard {
                     "command": proc.command,
                 })).collect::<Vec<_>>(),
                 "total": self.hosts.len(),
+                // 进程扫描靠 `ps`，Windows 没有；别让界面把「扫不了」显示成「没有孤儿」。
+                "scan_supported": cfg!(unix),
             },
             "history": self.settings.history.iter().map(|entry| json!({
                 "version": entry.version,

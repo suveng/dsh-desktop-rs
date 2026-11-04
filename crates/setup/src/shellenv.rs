@@ -14,26 +14,26 @@
 //! 两条都失败也不拦启动：调用方回落到进程自己的 `PATH`。
 
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
+#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
 /// 关掉登录 shell 探测：`DSH_DESKTOP_NO_SHELL_PATH=1`。
 pub const DISABLE_VAR: &str = "DSH_DESKTOP_NO_SHELL_PATH";
 
 /// 探测超时：登录 shell 会跑 rc（nvm / oh-my-zsh 常见几百毫秒），给余量但必须封顶。
+#[cfg(not(windows))]
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(not(windows))]
 const MARK: &str = "__DSH_DESKTOP_PATH__";
 
-/// 读登录 shell 的 `PATH`，失败返回 `None`。
-///
-/// 用 `-ilc` 走交互式登录初始化：nvm 一般只把 `bin` 加在 `.zshrc` / `.bashrc` 里，
-/// 只加 `-c` 拿不到。输出用一对标记包住，rc 里的 echo / 提示符不会混进结果。
-#[must_use]
 /// 启动时要用的 shell：`$SHELL` 优先。
 ///
 /// Dock / Finder / LaunchServices 启动的进程拿不到 `$SHELL`，此时按平台默认顺序挑一个，
 /// 否则 nvm / volta 这些只在 rc 文件里生效的目录就永远探测不到（面板会误报「node 未安装」）。
+#[cfg(not(windows))]
 fn shell_program() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os("SHELL").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(value));
@@ -44,6 +44,19 @@ fn shell_program() -> Option<PathBuf> {
         .find(|path| path.exists())
 }
 
+/// Windows 没有「登录 shell」这回事：进程已经从资源管理器继承了系统 + 用户 PATH，
+/// 缺的部分交给 [`common_dirs`] 的约定目录兜底，不必再去 spawn 一个 shell。
+#[cfg(windows)]
+#[must_use]
+pub fn login_shell_path() -> Option<PathBuf> {
+    None
+}
+
+/// 读登录 shell 的 `PATH`，失败返回 `None`。
+///
+/// 用 `-ilc` 走交互式登录初始化：nvm 一般只把 `bin` 加在 `.zshrc` / `.bashrc` 里，
+/// 只加 `-c` 拿不到。输出用一对标记包住，rc 里的 echo / 提示符不会混进结果。
+#[cfg(not(windows))]
 #[must_use]
 pub fn login_shell_path() -> Option<PathBuf> {
     if std::env::var_os(DISABLE_VAR).is_some_and(|value| value != "0") {
@@ -103,10 +116,64 @@ pub fn common_dirs(home: &Path) -> Vec<PathBuf> {
     dirs.extend(nvm_node_bins(home));
     dirs.push(PathBuf::from("/opt/homebrew/bin"));
     dirs.push(PathBuf::from("/usr/local/bin"));
+    #[cfg(windows)]
+    dirs.extend(windows_dirs(home));
     dirs
 }
 
+/// Windows 上摸不到登录 shell 的 PATH，只能靠这些约定位置兜底。
+///
+/// 顺序：nvm-windows 的软链（`%NVM_SYMLINK%`，默认 `C:\Program Files\nodejs`）、
+/// 官方安装包（同上）、用户级 node 安装、全局 npm 前缀（`%APPDATA%\npm`，
+/// 全局装的 `dsh.cmd` 在这里）、corepack / pnpm。
+#[cfg(windows)]
+fn windows_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(link) = std::env::var_os("NVM_SYMLINK") {
+        dirs.push(PathBuf::from(link));
+    }
+    if let Some(dir) = std::env::var_os("ProgramFiles") {
+        dirs.push(PathBuf::from(dir).join("nodejs"));
+    }
+    if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(dir);
+        dirs.push(local.join("Programs").join("nodejs"));
+        dirs.push(local.join("pnpm"));
+    }
+    if let Some(dir) = std::env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(dir).join("npm"));
+    }
+    dirs.extend(nvm_node_bins(home));
+    dirs
+}
+
+/// Windows 上 nvm-windows 把版本放在 `%NVM_HOME%\vX.Y.Z`（没有 `bin/`），
+/// 与 unix 的 `~/.nvm/versions/node/vX.Y.Z/bin` 完全不是一个布局。
+#[cfg(windows)]
+#[must_use]
+pub fn nvm_node_bins(home: &Path) -> Vec<PathBuf> {
+    let root = std::env::var_os("NVM_HOME").map_or_else(
+        || std::env::var_os("APPDATA").map_or_else(|| home.join("nvm"), PathBuf::from),
+        PathBuf::from,
+    );
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut versions: Vec<(Vec<u64>, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let key = version_key(&name);
+            (!key.is_empty()).then(|| (key, entry.path()))
+        })
+        .collect();
+    versions.sort_by(|left, right| right.0.cmp(&left.0));
+    versions.into_iter().map(|(_, dir)| dir).collect()
+}
+
 /// `~/.nvm/versions/node/*/bin`，版本号从新到旧。
+#[cfg(not(windows))]
 #[must_use]
 pub fn nvm_node_bins(home: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) else {

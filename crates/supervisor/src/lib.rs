@@ -401,6 +401,12 @@ impl Host {
 
         #[cfg(unix)]
         signal_group(self.pid, libc::SIGTERM);
+        // Windows 没有「礼貌地请你退出」这回事：`Child::kill` 就是 TerminateProcess，
+        // 立刻生效。所以别在那儿空等满 grace（退出时会明显卡一下）。
+        #[cfg(windows)]
+        {
+            let _ = self.child.kill();
+        }
 
         let deadline = Instant::now() + self.spec.stop_grace;
         while Instant::now() < deadline {

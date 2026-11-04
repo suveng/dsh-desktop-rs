@@ -69,10 +69,21 @@ fn base_dir(var: &str, fallback: &str) -> PathBuf {
     }
 }
 
-/// 用户主目录：`$HOME`，取不到时退回当前目录。
+/// 用户主目录：`$HOME`，Windows 上 `$HOME` 通常不存在、要看 `%USERPROFILE%`。
+///
+/// 只认 `$HOME` 的话 Windows 会回退到 `.`（相对当前目录）——于是 settings.json、
+/// 日志、装出来的 node 全都落进 exe 所在目录或 `C:\Windows\System32`，看起来像
+/// 「配置丢了 / 插件装不上」。所以 Windows 上再补一次 `USERPROFILE`。
 #[must_use]
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
+    if let Some(dir) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    #[cfg(windows)]
+    if let Some(dir) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(".")
 }
 
 /// 上次退出时的窗口几何。

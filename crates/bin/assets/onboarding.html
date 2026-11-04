@@ -200,6 +200,15 @@
   // 孤儿 = 上次壳没来得及收的宿主（⌘Q / 强杀 / 崩溃都会留下），它们还占着端口和实例锁。
   function hostsCard() {
     const h = S.hosts || {};
+    if (h.scan_supported === false) {
+      return '<div class="card"><p class="hint" style="margin-top:0">dsh 进程</p>' +
+        statusRow("当前壳", h.current ? "已连接" : "未连接",
+          h.current ? "ok" : "warn",
+          h.current ? "pid " + h.current.pid + (h.current.url ? " · " + h.current.url : "") :
+            (h.expected_pid ? "找不到 pid " + h.expected_pid + "（可能已退出）" : "壳还没启动宿主")) +
+        '<p class="hint">当前平台不支持进程扫描（依赖 ps），所以看不到孤儿 dsh 列表；' +
+        "退出壳时仍会连带收掉它启动的宿主。</p></div>";
+    }
     const cur = h.current, orphans = h.orphans || [];
     let rows = "";
     rows += statusRow("当前壳", cur ? (cur.ready ? "已连接" : "启动中") : "未连接",
