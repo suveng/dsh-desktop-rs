@@ -106,6 +106,8 @@ jobs:
 
           candle.exe -out target\wix\product.wixobj target\wix\product.wxs
           light.exe -out "dist\dsh-desktop-$version-windows-x64.msi" target\wix\product.wixobj
+          # light.exe 会把调试符号库 .wixpdb 写到 -out 旁边（也就是 dist），它不该进发行包。
+          Remove-Item "dist\*.wixpdb" -ErrorAction SilentlyContinue
 
           # 只把真正的发行文件放进 dist，避免把 LICENSE/README/wixpdb 也传成发布附件
           $stage = "target\winzip"
