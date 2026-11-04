@@ -69,9 +69,22 @@
 
 - 备份：`$XDG_STATE_HOME/dsh-desktop-rs/backups/<profile>-<stamp>.tar.gz`，**不含 `node_modules`**。
 - 还原前自动把现有目录挪成 `<profile>.bak-<stamp>`（还原失败会挪回来）。
-- 导入：接受 `.tar.gz`，单层目录自动扒掉，必须含 `package.json`；导入后要补依赖才能启动。
+- 导入：接受 `.tar.gz`，单层目录自动扒掉，必须含 `package.json`。
+- 还原 / 导入之后**自动排队 `RepairDeps`**：归档不含 `node_modules`，依赖由壳补。
 
 这些都对应 `crates/setup/src/profiles.rs`，纯逻辑 + 单测，不碰界面。
+
+## 依赖重建（`RepairDeps`）
+
+跑 `pnpm install` 之前先做三件事，见 `crates/setup/src/pnpm.rs`：
+
+1. `allowBuilds` 占位符定值（`<pkg>: set this to true or false` → `<pkg>: true`），
+   否则 pnpm 直接 `ERR_PNPM_IGNORED_BUILDS` 退出；
+2. store 自检：`node_modules/.modules.yaml` 的 `storeDir` vs profile 目录里 `pnpm store path`；
+3. 不一致就带 `CI=true` 整装重装（pnpm 只在非交互下 purge `node_modules`）；
+   判定不了时按「照常 install」处理，不凭猜测删依赖。
+
+完整输出落 `<state>/logs/profile-deps.log`（成功也写：能对照当时用的哪套 store）。
 
 ## 实现位置
 
@@ -82,6 +95,7 @@
 | `crates/setup/src/node.rs` | 官方 tarball 下载 + SHA-256 校验 + 解压 + 自检 |
 | `crates/setup/src/install.rs` | 长任务：逐行日志、可取消、超时 |
 | `crates/setup/src/profiles.rs` | profile 枚举 / 备份 / 还原 / 导入 / 补依赖 |
+| `crates/setup/src/pnpm.rs` | 依赖重建：store 自检、`allowBuilds` 定值、`CI=true` 重装、`pnpm store path` 探测 |
 | `crates/bin/src/onboard.rs` | 状态机：六步、命令、执行队列、`view()` 快照 |
 | `crates/bin/assets/onboarding.html` | 纯渲染：只吃 `view()` 的 JSON，点击回传命令 |
 | `crates/bin/src/main.rs` | 失败路由、IPC 分发、把快照推给页面、装完重启宿主 |

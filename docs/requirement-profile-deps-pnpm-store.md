@@ -1,6 +1,6 @@
 # 需求：重建 profile 依赖时必须对齐 pnpm store（否则插件页更新永久失败）
 
-状态：待实现（2026-11-05 提）
+状态：已实现（v0.1.16）
 触发场景：用户装完壳后，在 dsh 插件页点「更新」，报 `ERR_PNPM_UNEXPECTED_STORE`。
 
 ## 1. 现象
@@ -73,7 +73,7 @@ pnpm now wants to use the store at "/home/suveng/.local/share/pnpm/store/v11" to
   dsh 的 `dsh-plugin-manager` 只是后续使用者，它拿到的已是一个自相矛盾的 profile。
 - 同理 `pnpm-workspace.yaml` 里的 `allowBuilds` 占位符也是壳那次 `pnpm install` 写下的。
 
-## 5. 需求
+## 5. 需求（R1–R4 已在 v0.1.16 实现，R5 未做）
 
 **R1（必须）store 对齐。** `RepairDeps` 前先比对：读 `node_modules/.modules.yaml` 的 `storeDir`
 与"在 profile 目录内执行当前 pnpm 得到的 store 路径"。两者不一致时按"重装"处理，而不是直接

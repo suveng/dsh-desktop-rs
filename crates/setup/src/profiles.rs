@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::install::{Job, run_blocking};
+use crate::install::run_blocking;
 use crate::stamp::utc_stamp;
 
 /// 能提供 Web UI 的 bundle 名。
@@ -331,15 +331,14 @@ pub fn needs_deps(profile: &Path) -> bool {
     !profile.join("node_modules").exists() && profile.join("package.json").exists()
 }
 
-/// 在 profile 目录里跑 `pnpm install`（dsh 的 profile 本身就是 pnpm 项目）。
-pub fn repair_deps(profile: &Path) -> io::Result<Job> {
-    Job::spawn(
-        // Windows 上是 `pnpm.cmd`：直接 spawn `pnpm` 会得到 os error 193。
-        &crate::envcheck::resolve_program("pnpm"),
-        &["install".to_owned(), "--prefer-offline".to_owned()],
-        &[],
-        Some(profile),
-    )
+/// 在 profile 目录里重建依赖（dsh 的 profile 本身就是 pnpm 项目）。
+///
+/// 真正的活交给 [`crate::pnpm::repair_deps`]：先定值 `allowBuilds` 占位符，再按
+/// store 自检决定要不要整装重装 —— 直接 `pnpm install` 在 store 不一致时只会
+/// `ERR_PNPM_UNEXPECTED_STORE` 退出，profile 永远修不好。
+pub fn repair_deps(profile: &Path, env: &[(String, String)]) -> io::Result<crate::pnpm::Repair> {
+    // Windows 上是 `pnpm.cmd`：直接 spawn `pnpm` 会得到 os error 193。
+    crate::pnpm::repair_deps(profile, &crate::envcheck::resolve_program("pnpm"), env)
 }
 
 /// 目录体积（字节）。`node_modules` 跳过：它是链接森林，统计它既慢又没意义。

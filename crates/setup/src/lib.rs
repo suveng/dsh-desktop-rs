@@ -7,6 +7,7 @@ pub mod envcheck;
 pub mod install;
 pub mod node;
 pub mod plugins;
+pub mod pnpm;
 pub mod profiles;
 pub mod settings;
 pub mod shellenv;

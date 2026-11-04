@@ -280,6 +280,8 @@ pub struct Onboard {
     selected_backup: Option<PathBuf>,
     /// 导入时要复制的归档（由文件选择器选好）。
     pending_archive: Option<PathBuf>,
+    /// 当前这次 `pnpm install` 的输出（重建依赖后落盘，见 [`Self::persist_deps_log`]）。
+    deps_log: String,
     dirty: bool,
 }
 
@@ -313,6 +315,7 @@ impl Onboard {
             host_ready: false,
             selected_backup: None,
             pending_archive: None,
+            deps_log: String::new(),
             dirty: true,
         }
     }
@@ -473,6 +476,34 @@ impl Onboard {
         matches!(self.running, Running::Idle)
     }
 
+    /// 把这次依赖重建的完整输出写到 `<state>/logs/profile-deps.log`。
+    ///
+    /// 不管成败都写：成功时的输出能看出当时用的是哪套 store（下次出事好对照），
+    /// 失败时更是唯一能拿到 pnpm 原文的地方。
+    fn persist_deps_log(
+        &mut self,
+        profile: &str,
+        result: Result<String, String>,
+    ) -> Result<String, String> {
+        let dir = self.paths.state.join("logs");
+        let file = dir.join("profile-deps.log");
+        let body = format!(
+            "# profile「{profile}」依赖重建（{}）\n{}\n",
+            stamp::utc_stamp(stamp::now_unix()),
+            self.deps_log
+        );
+        if let Err(err) =
+            settings::ensure_private_dir(&dir).and_then(|()| std::fs::write(&file, body.as_bytes()))
+        {
+            push_log(&mut self.log, "warn", format!("写依赖日志失败：{err}"));
+        }
+        match result {
+            Ok(note) if note.is_empty() => Ok(format!("依赖已重建（日志 {}）", file.display())),
+            Ok(note) => Ok(note),
+            Err(err) => Err(format!("{err}（完整日志：{}）", file.display())),
+        }
+    }
+
     fn advance(&mut self, candidates: &[envcheck::Candidate]) -> Effect {
         let mut finished: Option<(Step, Result<String, String>)> = None;
         match &mut self.running {
@@ -486,6 +517,9 @@ impl Onboard {
                         "out"
                     };
                     push_log(&mut self.log, kind, line.clone());
+                    if matches!(step, Step::RepairDeps { .. }) {
+                        push_deps_line(&mut self.deps_log, line);
+                    }
                 }
                 if let Some(code) = outcome.finished {
                     let step = step.clone();
@@ -521,6 +555,11 @@ impl Onboard {
         result: Result<String, String>,
         candidates: &[envcheck::Candidate],
     ) -> Effect {
+        // 依赖重建的输出比界面留得久：失败时用户要能把整段 pnpm 日志贴出来。
+        let result = match &step {
+            Step::RepairDeps { profile } => self.persist_deps_log(profile, result),
+            _ => result,
+        };
         match result {
             Ok(note) => self.after_success(step, note, candidates),
             Err(err) => {
@@ -620,8 +659,17 @@ impl Onboard {
                     .record_install(&version, &program, stamp::now_unix());
                 self.dirty = true;
             }
-            Step::Backup { .. } | Step::Restore { .. } | Step::Import { .. } => {
+            Step::Backup { .. } => self.refresh(candidates),
+            // 还原 / 导入回来的 profile 没有 `node_modules`（归档里本来就排除了它），
+            // 必须马上用 pnpm 补上：少了这一步，宿主起来后插件页第一次点「更新」
+            // 就会撞上缺依赖 / store 不一致，而用户根本看不出是壳偷的懒。
+            Step::Restore { profile, .. } => {
                 self.refresh(candidates);
+                self.pending.push_back(Step::RepairDeps { profile });
+            }
+            Step::Import { name, .. } => {
+                self.refresh(candidates);
+                self.pending.push_back(Step::RepairDeps { profile: name });
             }
             Step::RepairDeps { .. } => {}
             Step::InstallPlugins { packages, .. } => {
@@ -738,15 +786,19 @@ impl Onboard {
             }
             Step::RepairDeps { profile } => {
                 let dir = paths.profiles_root().join(&profile);
-                match Job::spawn(
-                    &pnpm_program(),
-                    &["install".to_owned(), "--prefer-offline".to_owned()],
-                    &env,
-                    Some(&dir),
-                ) {
-                    Ok(job) => Running::Job { job, step },
+                match profiles::repair_deps(&dir, &env) {
+                    Ok(repair) => {
+                        self.deps_log.clear();
+                        for note in repair.notes {
+                            push_log(&mut self.log, "info", note);
+                        }
+                        Running::Job {
+                            job: repair.job,
+                            step,
+                        }
+                    }
                     Err(err) => {
-                        self.error = Some(format!("启动 pnpm 失败：{err}"));
+                        self.error = Some(format!("重建依赖失败：{err}"));
                         Running::Idle
                     }
                 }
@@ -1433,6 +1485,23 @@ fn step_note_wanted(step: &Step) -> bool {
     !matches!(step, Step::FetchVersions | Step::Reprobe)
 }
 
+/// 收一行 `pnpm install` 的输出（只给 RepairDeps 用）。
+///
+/// 写成自由函数是为了能在 `match &mut self.running` 里面调：方法调用会借走整个
+/// `self`，与 `self.running` 的可变借用冲突，而 `&mut self.deps_log` 只借一个字段。
+fn push_deps_line(log: &mut String, line: &str) {
+    log.push_str(line);
+    log.push('\n');
+    // 只留最后 64 KiB：装 183 个包会刷几千行，界面日志那边另有 2000 行的上限。
+    const KEEP: usize = 64 * 1024;
+    if log.len() > KEEP {
+        let cut = log.len() - KEEP;
+        // 从下一行开头切，别把一行劈成两半。
+        let cut = log[cut..].find('\n').map_or(cut, |offset| cut + offset + 1);
+        log.drain(..cut);
+    }
+}
+
 fn push_log(log: &mut Vec<LogLine>, kind: &'static str, text: String) {
     // 页面上的「安装日志」跟一份到 stderr：用户只能截图，日志文件里能直接查。
     eprintln!("dsh-desktop: 引导页日志 [{kind}] {text}");
@@ -1472,11 +1541,6 @@ fn npm_program(env: &EnvReport) -> PathBuf {
         }
     }
     envcheck::find_in_path("npm").unwrap_or_else(|| PathBuf::from("npm"))
-}
-
-/// 同 `npm_program`，只是找 pnpm（Windows 上是 `pnpm.cmd`，直接 spawn `pnpm` 会 error 193）。
-fn pnpm_program() -> PathBuf {
-    envcheck::resolve_program("pnpm")
 }
 
 fn spawn_worker(
