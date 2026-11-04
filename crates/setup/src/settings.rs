@@ -129,7 +129,22 @@ pub struct Settings {
     /// 引导页勾选的推荐插件（包名）。`None` = 还没选过，等同「全部推荐项」。
     /// 存 `None` 而不是空表，是为了区分「默认全选」和「用户主动全部取消」。
     pub plugins: Option<Vec<String>>,
+    /// 用户做选择时，推荐清单里都有哪些包。
+    ///
+    /// 有了它，后来新增的推荐项（比如 0.1.13 加的 `billion-context`）对被挡在
+    /// 旧清单之外的老用户也默认勾上；而当时被主动取消的项仍然保持取消。
+    /// `None`（老配置文件）按 [`LEGACY_RECOMMENDED`] 处理。
+    #[serde(default)]
+    pub plugins_seen: Option<Vec<String>>,
 }
+
+/// 0.1.13 之前的推荐清单。老配置文件没有 `plugins_seen`，用这份当「用户当时见过什么」，
+/// 于是后来新增的推荐项默认勾上，而当时被取消的项仍然保持取消。
+pub const LEGACY_RECOMMENDED: &[&str] = &[
+    "suveng-dsh-plugin-memory",
+    "suveng-dsh-plugin-mcp-manager",
+    "dsh-plugin-feishu",
+];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -144,22 +159,39 @@ impl Default for Settings {
             extra_path: Vec::new(),
             env: BTreeMap::new(),
             plugins: None,
+            plugins_seen: None,
         }
     }
 }
 
 impl Settings {
-    /// 要预装的插件：没选过就是全部推荐项；选过的只保留清单里的名字。
+    /// 要预装的插件。
+    ///
+    /// - 没选过（`plugins = None`）：全部推荐项。
+    /// - 选过：清单里的名字 + 用户没见过的新推荐项（默认勾上，否则每次加推荐都得
+    ///   让老用户重跑一遍引导页才会装）。
     #[must_use]
     pub fn selected_plugins(&self) -> Vec<String> {
-        match &self.plugins {
-            Some(list) => list
-                .iter()
-                .filter(|name| crate::plugins::is_recommended(name))
-                .cloned()
-                .collect(),
-            None => crate::plugins::recommended_names(),
-        }
+        let Some(list) = &self.plugins else {
+            return crate::plugins::recommended_names();
+        };
+        crate::plugins::RECOMMENDED
+            .iter()
+            .filter(|item| {
+                let chosen = list.iter().any(|name| name == item.name);
+                let seen = match &self.plugins_seen {
+                    Some(names) => names.iter().any(|name| name == item.name),
+                    None => LEGACY_RECOMMENDED.contains(&item.name),
+                };
+                chosen || !seen
+            })
+            .map(|item| item.name.to_owned())
+            .collect()
+    }
+
+    /// 记下这次做选择时看到的推荐清单（保存设置时调用）。
+    pub fn mark_plugins_seen(&mut self) {
+        self.plugins_seen = Some(crate::plugins::recommended_names());
     }
 
     /// 目标 dsh 版本（空值回落默认）。
@@ -337,12 +369,59 @@ mod tests {
     fn explicit_plugin_choice_wins_and_unknown_names_are_dropped() {
         let mut settings = Settings {
             plugins: Some(vec!["dsh-plugin-feishu".to_owned(), "left-pad".to_owned()]),
+            // 用户做选择时清单里已经有全部推荐项 → 没勾的就是主动取消。
+            plugins_seen: Some(crate::plugins::recommended_names()),
             ..Settings::default()
         };
         assert_eq!(settings.selected_plugins(), vec!["dsh-plugin-feishu"]);
         // 全部取消：空列表 ≠ 没选过，不能回落到「全选」。
         settings.plugins = Some(Vec::new());
         assert!(settings.selected_plugins().is_empty());
+    }
+
+    /// 0.1.13 加 billion-context 时，老配置文件里只有旧三项的选择：
+    /// 旧三项按用户的勾选，新加的那一项默认勾上。
+    #[test]
+    fn recommendations_added_later_default_to_selected_for_old_settings() {
+        let settings = Settings {
+            plugins: Some(vec![
+                "suveng-dsh-plugin-memory".to_owned(),
+                "dsh-plugin-feishu".to_owned(),
+            ]),
+            plugins_seen: None, // 老文件：没有这个字段
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.selected_plugins(),
+            vec![
+                "suveng-dsh-plugin-memory",
+                "billion-context",
+                "dsh-plugin-feishu"
+            ]
+        );
+
+        // 用户当时主动取消过的项，仍然保持取消（MCP 管理不在上面的列表里）。
+        assert!(
+            !settings
+                .selected_plugins()
+                .iter()
+                .any(|name| name == "suveng-dsh-plugin-mcp-manager")
+        );
+    }
+
+    /// 保存一次设置后，「见过的清单」被记下来，之后再加推荐项也不会重复打扰。
+    #[test]
+    fn saving_a_choice_records_what_the_user_saw() {
+        let mut settings = Settings {
+            plugins: Some(vec!["billion-context".to_owned()]),
+            ..Settings::default()
+        };
+        settings.mark_plugins_seen();
+        assert_eq!(
+            settings.plugins_seen.as_deref(),
+            Some(crate::plugins::recommended_names().as_slice())
+        );
+        assert_eq!(settings.selected_plugins(), vec!["billion-context"]);
     }
 
     #[test]

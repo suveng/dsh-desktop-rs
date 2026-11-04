@@ -1174,6 +1174,9 @@ impl Onboard {
                     })
                     .unwrap_or_default(),
             );
+            // 记下「这次看到的是哪几项」：以后新增推荐项才会默认勾上，
+            // 而此刻被取消的项保持取消。
+            self.settings.mark_plugins_seen();
         }
         if object.contains_key("extra_path") {
             self.settings.extra_path = text(object.get("extra_path"))
@@ -1651,6 +1654,12 @@ mod tests {
 
     fn fresh(paths: &Paths) -> Onboard {
         Onboard::new(paths.clone(), Settings::default(), &[])
+    }
+
+    /// 模拟用户在引导页上勾完插件、点保存：勾选列表 + 「当时见过哪些」一起落进设置。
+    fn onboarding_choice(onboard: &mut Onboard, chosen: &[&str]) {
+        onboard.settings.plugins = Some(chosen.iter().map(|name| (*name).to_owned()).collect());
+        onboard.settings.mark_plugins_seen();
     }
 
     /// 造一个「自己装的 node」+ 假的 npm，避免测试真的联网装包。
@@ -2264,7 +2273,7 @@ mod tests {
     fn install_queues_selected_plugins_after_dsh() {
         let (paths, root) = scratch("plugins-queue");
         let mut onboard = fresh(&paths);
-        onboard.settings.plugins = Some(vec!["dsh-plugin-feishu".to_owned()]);
+        onboarding_choice(&mut onboard, &["dsh-plugin-feishu"]);
         onboard.handle(&json!({"kind": "onboard", "cmd": "install"}), &[]);
 
         let queue: Vec<String> = onboard.pending.iter().map(Step::label).collect();
@@ -2287,7 +2296,7 @@ mod tests {
     fn unchecking_every_plugin_ships_nothing_extra() {
         let (paths, root) = scratch("plugins-none");
         let mut onboard = fresh(&paths);
-        onboard.settings.plugins = Some(Vec::new());
+        onboarding_choice(&mut onboard, &[]);
         onboard.handle(&json!({"kind": "onboard", "cmd": "install"}), &[]);
         assert!(
             !onboard
