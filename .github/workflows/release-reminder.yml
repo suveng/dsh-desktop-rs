@@ -9,6 +9,9 @@ name: release-reminder
 on:
   push:
     branches: [main]
+    # 打了 tag 也再跑一次：这样「先推 main 被判未发布、随后才打 tag」留下的提醒
+    # issue 能在 tag 到位后被自动关掉，不用等下一次 push main。
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
