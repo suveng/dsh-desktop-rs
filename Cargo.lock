@@ -648,7 +648,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dsh-desktop"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-platform"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "libc",
  "serde",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-setup"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "dsh-platform",
  "libc",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-supervisor"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "dsh-platform",
  "libc",
