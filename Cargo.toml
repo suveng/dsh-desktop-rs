@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/bin", "crates/platform", "crates/setup", "crates/supervisor"]
 
 [workspace.package]
-version = "0.1.16"
+version = "0.1.17"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -13,10 +13,10 @@ repository = "https://github.com/suveng/dsh-desktop-rs"
 # 补 version 是为了满足 cargo-deny 的 [bans] wildcards = "deny"：
 # 只有 path、没有 version 的依赖会被判成 wildcard，CI 的 license/advisory 检查会失败。
 # version 必须与 [workspace.package] 的 version 保持一致。
-dsh-desktop = { path = "crates/bin", package = "dsh-desktop", version = "0.1.16" }
-dsh-platform = { path = "crates/platform", version = "0.1.16" }
-dsh-setup = { path = "crates/setup", version = "0.1.16" }
-dsh-supervisor = { path = "crates/supervisor", version = "0.1.16" }
+dsh-desktop = { path = "crates/bin", package = "dsh-desktop", version = "0.1.17" }
+dsh-platform = { path = "crates/platform", version = "0.1.17" }
+dsh-setup = { path = "crates/setup", version = "0.1.17" }
+dsh-supervisor = { path = "crates/supervisor", version = "0.1.17" }
 
 [profile.dev.package."*"]
 # GUI 依赖在 dev 下也要优化，否则启动明显发卡（desigma 的同款取舍）。
