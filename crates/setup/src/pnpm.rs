@@ -190,6 +190,141 @@ pub fn patch_pending_builds(yaml: &str) -> (String, Vec<String>) {
     (out, names)
 }
 
+/// 从 pnpm 的输出里揪出被拦下的构建脚本对应的包名。
+///
+/// pnpm 12 的非交互模式下不会写占位符，只在最后报一段：
+/// `× installing dependencies` / `╰─▶ Ignored build scripts: protobufjs@7.6.6`
+/// / `help: Run "pnpm approve-builds" ...`，退出码非 0。要自动放行就得自己解析。
+#[must_use]
+pub fn ignored_builds(output: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let lower = line.to_lowercase();
+        let Some(at) = lower.find("ignored build scripts:") else {
+            continue;
+        };
+        for spec in line[at + "ignored build scripts:".len()..].split(',') {
+            // 有些版本会补一句 `(postinstall)`，版本号后面也不一定干净。
+            let spec = spec.split('(').next().unwrap_or_default().trim();
+            if let Some(name) = package_name(spec)
+                && !names.iter().any(|seen| seen == name)
+            {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// `protobufjs@7.6.6` / `@scope/pkg@1.2.3` / `esbuild` → 包名；不像包名就 `None`。
+fn package_name(spec: &str) -> Option<&str> {
+    let spec = spec
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`');
+    if spec.is_empty() {
+        return None;
+    }
+    // 作用域包的第一个 `@` 是前缀，真正的版本分隔符在后一个。
+    let version_at = match spec.strip_prefix('@') {
+        Some(rest) => rest.find('@').map(|at| at + 1),
+        None => spec.find('@'),
+    };
+    let name = match version_at {
+        Some(at) => {
+            let version = &spec[at + 1..];
+            // 冒号后面不是数字说明这不是版本号，整串当名字（宁可放过，不要乱写 YAML）。
+            if !version.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            &spec[..at]
+        }
+        None => spec,
+    };
+    let ok = name.chars().all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.' | '/' | '@')
+    }) && name.chars().any(|c| c.is_ascii_alphabetic());
+    ok.then_some(name)
+}
+
+/// 把包名写进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds` 白名单，返回真正新增的。
+///
+/// 这是 [`fix_pending_builds`] 的补充：那个只管「占位符」形态，pnpm 12 干脆不写
+/// 占位符，只在报错里列出来 —— 不主动放行，插件就永远装不上（`billion-context`
+/// 依赖的 `protobufjs` 需要跑 postinstall）。
+pub fn allow_builds(profile: &Path, names: &[String]) -> io::Result<Vec<String>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let file = profile.join("pnpm-workspace.yaml");
+    let raw = fs::read_to_string(&file).unwrap_or_default();
+    let (patched, added) = merge_allow_builds(&raw, names);
+    if added.is_empty() {
+        return Ok(added);
+    }
+    fs::write(&file, patched)?;
+    Ok(added)
+}
+
+/// [`allow_builds`] 的纯文本版本：合并进已有的 `allowBuilds:` 映射，没有就追加一段。
+///
+/// 只认顶层 `allowBuilds:`（pnpm 的写法），已有的 `true` 不重复写，显式的
+/// `false` 也不覆盖 —— 那是用户自己拒绝的，我们不该替他改主意。
+#[must_use]
+pub fn merge_allow_builds(yaml: &str, names: &[String]) -> (String, Vec<String>) {
+    // 先把占位符定值，剩下的才是要新写进白名单的。
+    let (yaml, fixed) = patch_pending_builds(yaml);
+    let mut lines: Vec<String> = yaml.lines().map(str::to_owned).collect();
+    let mut added: Vec<String> = Vec::new();
+    let header = lines
+        .iter()
+        .position(|line| line.trim() == "allowBuilds:" && !line.starts_with(' '));
+
+    let mut insert_at = match header {
+        Some(index) => {
+            // 块结束于第一行「有内容且不缩进」的位置。
+            let mut end = index + 1;
+            while end < lines.len() {
+                let line = &lines[end];
+                if !line.trim().is_empty() && !line.starts_with(' ') {
+                    break;
+                }
+                end += 1;
+            }
+            end
+        }
+        None => {
+            if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("allowBuilds:".to_owned());
+            lines.len()
+        }
+    };
+
+    for name in names {
+        if fixed.iter().any(|fixed| fixed == name) {
+            continue;
+        }
+        let declared = lines.iter().any(|line| {
+            line.trim_start()
+                .strip_prefix(name.as_str())
+                .is_some_and(|rest| rest.trim_start().starts_with(':'))
+        });
+        if declared {
+            continue;
+        }
+        lines.insert(insert_at, format!("  {name}: true"));
+        insert_at += 1;
+        added.push(name.clone());
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    (out, added)
+}
+
 /// 一次依赖重建：跑着的 `pnpm install` + 这一步做的额外处理（写进引导页日志）。
 pub struct Repair {
     pub job: Job,
@@ -371,6 +506,66 @@ minimumReleaseAgeExclude:
         // 没有 pnpm-workspace.yaml 的 profile 不报错。
         let bare = tempdir("builds-bare");
         assert!(fix_pending_builds(&bare).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ignored_builds_reads_the_pnpm_12_error() {
+        let output = "Progress: resolved 13, reused 11, downloaded 2, added 12\n\
+\nError: ERR_PNPM_IGNORED_BUILDS\n\n  × installing dependencies\n\
+  ╰─▶ Ignored build scripts: protobufjs@7.6.6\n\
+  help: Run \"pnpm approve-builds\" to pick which dependencies should be allowed\n";
+        assert_eq!(ignored_builds(output), vec!["protobufjs"]);
+        // 多个 + 作用域包 + 括号后缀。
+        assert_eq!(
+            ignored_builds(
+                "Ignored build scripts: esbuild@0.21.5, @swc/core@1.7.0, sharp@0.33.4 (postinstall)"
+            ),
+            vec!["esbuild", "@swc/core", "sharp"]
+        );
+        // 没有版本号也认；不是包名的整串丢掉。
+        assert_eq!(
+            ignored_builds("Ignored build scripts: esbuild"),
+            vec!["esbuild"]
+        );
+        assert!(ignored_builds("Ignored build scripts: ../ evil").is_empty());
+        assert!(ignored_builds("nothing to see here").is_empty());
+    }
+
+    #[test]
+    fn allow_builds_appends_a_block_to_a_file_without_one() {
+        let profile = tempdir("allow-new");
+        assert!(allow_builds(&profile, &["protobufjs".to_owned()]).unwrap() == vec!["protobufjs"]);
+        let text = fs::read_to_string(profile.join("pnpm-workspace.yaml")).unwrap();
+        assert_eq!(text, "allowBuilds:\n  protobufjs: true\n");
+        // 第二次是空操作。
+        assert!(
+            allow_builds(&profile, &["protobufjs".to_owned()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn allow_builds_merges_into_the_existing_block() {
+        let yaml = "packages:\n  - .\nallowBuilds:\n  esbuild: true\n  sharp: false\nminimumReleaseAgeExclude:\n  - '@deepseek-ai/dsh'\n";
+        let (merged, added) = merge_allow_builds(
+            yaml,
+            &[
+                "protobufjs".to_owned(),
+                "esbuild".to_owned(),
+                "sharp".to_owned(),
+            ],
+        );
+        assert_eq!(added, vec!["protobufjs"]);
+        assert!(merged.contains("allowBuilds:\n  esbuild: true\n  sharp: false\n  protobufjs: true\nminimumReleaseAgeExclude:"));
+        // 用户的显式 false 不被改动。
+        assert!(merged.contains("sharp: false"));
+        // 占位符形态也一并定值。
+        let placeholder = "allowBuilds:\n  protobufjs: set this to true or false\n";
+        let (merged, added) = merge_allow_builds(placeholder, &["protobufjs".to_owned()]);
+        assert!(added.is_empty(), "占位符已经在 fix_pending_builds 里定值了");
+        assert!(merged.contains("protobufjs: true"));
+        assert!(!merged.contains("set this to true or false"));
     }
 
     #[test]

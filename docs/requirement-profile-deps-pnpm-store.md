@@ -112,3 +112,24 @@ store，或整体换成用户当前 pnpm 的 store"，不允许半新半旧。
 用户机器上已手工执行 `CI=true pnpm install --prefer-offline` 并用 `pnpm add dsh-plugin-feishu@0.7.0`
 把 profile 拉回新 store；这只是绕开缺陷，根因仍在壳侧。以后不再手工动 `~/.dsh/profiles/*`
 （那是壳的资产），只提需求。
+
+## 8. 补记：pnpm 本身缺失 / 构建脚本被拦（Windows 实测，2026-11-05）
+
+Windows 用户装完 dsh 后「预装推荐插件」失败，排查出两件与 store 无关的事，现在都由壳自己兜住：
+
+- **机器上没有 pnpm。** dsh 的插件命令内部就是 `pnpm add`，而 node 自带的是 npm。
+  缺 pnpm 时 dsh 只回一句没头没尾的失败（plugin-manager 日志里就是
+  `Command failed with exit code 1`），用户完全不知道要去装 pnpm。
+  现在 `Step::EnsurePnpm` 排在插件步骤之前：`npm install -g pnpm`（用我们装的 node 旁边的 npm，
+  PATH 前置，Windows 走 `npm.cmd`）。已经装了就只打一行「pnpm 已就绪：<路径>」。
+- **`ERR_PNPM_IGNORED_BUILDS`。** pnpm 12 在非交互模式下不会写 `allowBuilds` 占位符，
+  只在末尾报 `╰─▶ Ignored build scripts: protobufjs@7.6.6` 然后退出（`billion-context`
+  依赖的 `protobufjs` 需要 postinstall）。现在 `pnpm::ignored_builds()` 解析这段输出，
+  `pnpm::allow_builds()` 把包名合并进 profile 的 `pnpm-workspace.yaml`（`allowBuilds: { 包名: true }`，
+  已有的 `true` 不重复写、用户的显式 `false` 不覆盖），随后自动重跑一次。
+  `Step::InstallPlugins` 和 `Step::RepairDeps` 都走这条；每轮只放行一次，避免死循环。
+
+对应测试：`pnpm::tests::ignored_builds_reads_the_pnpm_12_error`、
+`allow_builds_appends_a_block_to_a_file_without_one`、`allow_builds_merges_into_the_existing_block`、
+`onboard::tests::install_queues_pnpm_before_the_plugins`、
+`plugins_allow_blocked_builds_and_retry_once`、`pnpm_is_looked_up_next_to_the_bundled_node`。

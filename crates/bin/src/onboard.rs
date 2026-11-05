@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use dsh_setup::envcheck::{self, DshRuntime, NodeRuntime};
 use dsh_setup::install::{Job, Stream, run_blocking};
+use dsh_setup::pnpm;
 use dsh_setup::profiles::{self, ProfileInfo};
 use dsh_setup::settings::{self, FALLBACK_NODE_VERSION, InstallScope, Settings};
 use dsh_setup::{node, stamp, version::Version};
@@ -185,6 +186,8 @@ enum Step {
         version: String,
         scope: InstallScope,
     },
+    /// 插件安装要靠 pnpm，而 node 自带的是 npm —— 缺了就现装一个。
+    EnsurePnpm,
     /// dsh 装完之后的推荐插件：用的是 dsh 自己的 `plugin add`（内部转发 pnpm）。
     InstallPlugins {
         profile: String,
@@ -220,6 +223,7 @@ impl Step {
                 _ => format!("安装 dsh {version}"),
             },
             Self::RepairDeps { profile } => format!("重建 profile「{profile}」的依赖"),
+            Self::EnsurePnpm => "检查 pnpm".to_owned(),
             Self::InstallPlugins { packages, .. } => {
                 format!("预装推荐插件（{} 个）", packages.len())
             }
@@ -282,6 +286,11 @@ pub struct Onboard {
     pending_archive: Option<PathBuf>,
     /// 当前这次 `pnpm install` 的输出（重建依赖后落盘，见 [`Self::persist_deps_log`]）。
     deps_log: String,
+    /// 当前这一步最近的输出（stdout + stderr）。失败原因可能缩在中间某一行
+    /// （pnpm 的 `ERR_PNPM_IGNORED_BUILDS` 就是），只看 stderr 末行会漏掉。
+    recent: std::collections::VecDeque<String>,
+    /// 这一轮已经替用户放行过被拦的构建脚本：防止「放行 → 重试 → 又失败」死循环。
+    builds_allowed: bool,
     dirty: bool,
 }
 
@@ -316,6 +325,8 @@ impl Onboard {
             selected_backup: None,
             pending_archive: None,
             deps_log: String::new(),
+            recent: std::collections::VecDeque::new(),
+            builds_allowed: false,
             dirty: true,
         }
     }
@@ -517,6 +528,12 @@ impl Onboard {
                         "out"
                     };
                     push_log(&mut self.log, kind, line.clone());
+                    // 失败原因可能藏在中间某行（pnpm 的 `Ignored build scripts:` 就是），
+                    // 所以留一份最近的原始输出给 `finish` 判读。
+                    if self.recent.len() == RECENT_LINES {
+                        self.recent.pop_front();
+                    }
+                    self.recent.push_back(line.clone());
                     if matches!(step, Step::RepairDeps { .. }) {
                         push_deps_line(&mut self.deps_log, line);
                     }
@@ -571,6 +588,40 @@ impl Onboard {
                     self.rev = self.rev.wrapping_add(1);
                     return Effect::None;
                 }
+                // pnpm 装不上也别拦主流程：dsh 本身能用，插件那步会自己再报一次。
+                if matches!(step, Step::EnsurePnpm) {
+                    push_log(&mut self.log, "warn", format!("安装 pnpm 失败：{err}"));
+                    self.notice = Some(
+                        "pnpm 没装上，插件安装会失败；可以稍后在命令行执行 npm install -g pnpm"
+                            .to_owned(),
+                    );
+                    self.rev = self.rev.wrapping_add(1);
+                    return Effect::None;
+                }
+                // pnpm 会拦下需要跑安装脚本的包（`billion-context` 依赖的 `protobufjs`
+                // 就是），非交互模式下它只报错不放行 —— 替用户放行一次再重试，
+                // 别让他在 Windows 上自己改 YAML。插件和重建依赖两条路都要管。
+                if let Step::InstallPlugins { profile, packages } = &step
+                    && self.allow_blocked_builds(
+                        profile,
+                        Step::InstallPlugins {
+                            profile: profile.clone(),
+                            packages: packages.clone(),
+                        },
+                    )
+                {
+                    return Effect::None;
+                }
+                if let Step::RepairDeps { profile } = &step
+                    && self.allow_blocked_builds(
+                        profile,
+                        Step::RepairDeps {
+                            profile: profile.clone(),
+                        },
+                    )
+                {
+                    return Effect::None;
+                }
                 // 插件装不上也不能抦住主流程：dsh 已经能用，用户之后还能在插件市场里补。
                 if matches!(step, Step::InstallPlugins { .. }) {
                     push_log(&mut self.log, "warn", format!("预装推荐插件失败：{err}"));
@@ -605,6 +656,34 @@ impl Onboard {
                 Effect::None
             }
         }
+    }
+
+    /// 上一次失败是不是「pnpm 拦下了构建脚本」：是就写进 `allowBuilds` 并重跑一次。
+    ///
+    /// 每轮只做一次（`builds_allowed`），否则一直失败会变成死循环。
+    fn allow_blocked_builds(&mut self, profile: &str, retry: Step) -> bool {
+        if self.builds_allowed {
+            return false;
+        }
+        let output = self.recent.iter().cloned().collect::<Vec<_>>().join("\n");
+        let blocked = pnpm::ignored_builds(&output);
+        if blocked.is_empty() {
+            return false;
+        }
+        let dir = self.paths.profiles_root().join(profile);
+        let allowed = pnpm::allow_builds(&dir, &blocked).unwrap_or_default();
+        if allowed.is_empty() {
+            return false;
+        }
+        self.builds_allowed = true;
+        push_log(
+            &mut self.log,
+            "info",
+            format!("已允许 {} 执行安装脚本，重试这一步", allowed.join("、")),
+        );
+        self.pending.push_front(retry);
+        self.rev = self.rev.wrapping_add(1);
+        true
     }
 
     fn after_success(
@@ -665,13 +744,20 @@ impl Onboard {
             // 就会撞上缺依赖 / store 不一致，而用户根本看不出是壳偷的懒。
             Step::Restore { profile, .. } => {
                 self.refresh(candidates);
+                self.pending.push_back(Step::EnsurePnpm);
                 self.pending.push_back(Step::RepairDeps { profile });
             }
             Step::Import { name, .. } => {
                 self.refresh(candidates);
+                self.pending.push_back(Step::EnsurePnpm);
                 self.pending.push_back(Step::RepairDeps { profile: name });
             }
             Step::RepairDeps { .. } => {}
+            Step::EnsurePnpm => {
+                // 新装的 pnpm 在 npm 的 prefix 里：重探一次环境顺带把报告刷新掉。
+                self.refresh(candidates);
+                push_log(&mut self.log, "ok", "pnpm 已安装".to_owned());
+            }
             Step::InstallPlugins { packages, .. } => {
                 self.refresh(candidates);
                 push_log(
@@ -699,6 +785,7 @@ impl Onboard {
 
     fn start_step(&mut self, step: Step) {
         self.rev = self.rev.wrapping_add(1);
+        self.recent.clear();
         push_log(&mut self.log, "info", format!("⟳ {}", step.label()));
         let env = self.settings.install_env();
         let paths = self.paths.clone();
@@ -757,6 +844,47 @@ impl Onboard {
                     Running::Idle
                 }
             },
+            Step::EnsurePnpm => {
+                // dsh 的插件命令内部就是 `pnpm add`：机器上没装 pnpm 时它只会报一句
+                // 没头没尾的 ENOENT（Windows 上实测连错误都没有）。这里先补上。
+                if let Some(found) = pnpm_program(&self.env) {
+                    push_log(
+                        &mut self.log,
+                        "info",
+                        format!("pnpm 已就绪：{}", found.display()),
+                    );
+                    return;
+                }
+                push_log(
+                    &mut self.log,
+                    "info",
+                    "没找到 pnpm，先装一个（插件安装要用）".to_owned(),
+                );
+                let npm = npm_program(&self.env);
+                let args = vec![
+                    "install".to_owned(),
+                    "-g".to_owned(),
+                    "pnpm".to_owned(),
+                    "--no-fund".to_owned(),
+                    "--no-audit".to_owned(),
+                ];
+                let mut job_env = env.clone();
+                if let Some(bin) = &self.env.node_bin {
+                    job_env.push((
+                        "PATH".to_owned(),
+                        envcheck::path_with(std::slice::from_ref(bin))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ));
+                }
+                match Job::spawn(&npm, &args, &job_env, None) {
+                    Ok(job) => Running::Job { job, step },
+                    Err(err) => {
+                        self.error = Some(format!("启动 npm 安装 pnpm 失败：{err}"));
+                        Running::Idle
+                    }
+                }
+            }
             Step::InstallPlugins { profile, packages } => {
                 // 所有东西都交给 dsh 自己做：它就是 pnpm 的转发层，而且会顺手把插件登记到
                 // profile 的 `dsh.profile.bundles`（手写 package.json 很容易漏这一步）。
@@ -994,6 +1122,7 @@ impl Onboard {
                     "还有任务在跑，等它结束再补装".to_owned()
                 } else {
                     let profile = self.settings.target_profile().to_owned();
+                    self.pending.push_back(Step::EnsurePnpm);
                     self.pending.push_back(Step::InstallPlugins {
                         profile,
                         packages: packages.clone(),
@@ -1315,6 +1444,8 @@ impl Onboard {
         // 插件必须排在 dsh 之后：命令本身就是刚装好的 dsh 提供的。
         let packages = self.settings.selected_plugins();
         if !packages.is_empty() {
+            // pnpm 是 dsh 插件命令的前提，node 不自带，所以先确认它装上了。
+            self.pending.push_back(Step::EnsurePnpm);
             self.pending.push_back(Step::InstallPlugins {
                 profile: self.settings.target_profile().to_owned(),
                 packages,
@@ -1549,6 +1680,19 @@ fn looks_like_permission_problem(err: &str) -> bool {
         || lower.contains("permission denied")
         || lower.contains("permission_error")
         || err.contains("EACCES")
+}
+
+/// `finish` 判读失败原因时回看的输出行数。
+const RECENT_LINES: usize = 200;
+
+/// pnpm 在哪：先看我们装的 node 旁边，再看 PATH（`npm install -g` 装完就落在这两处）。
+fn pnpm_program(env: &EnvReport) -> Option<PathBuf> {
+    if let Some(bin) = &env.node_bin
+        && let Some(candidate) = envcheck::program_in(bin, "pnpm")
+    {
+        return Some(candidate);
+    }
+    envcheck::find_in_path("pnpm")
 }
 
 /// npm 在哪：优先我们装的 node 旁边的 npm，其次 PATH。
@@ -2377,6 +2521,133 @@ mod tests {
 
     /// 「完成」页的「补装推荐插件」：不再走一遍装 dsh，只把插件步骤塞回队列。
     #[test]
+    fn install_queues_pnpm_before_the_plugins() {
+        let (paths, root) = scratch("pnpm-order");
+        let mut onboard = fresh(&paths);
+        onboard.handle(&json!({"kind": "onboard", "cmd": "install"}), &[]);
+
+        let queue: Vec<String> = onboard.pending.iter().map(Step::label).collect();
+        let pnpm_at = queue
+            .iter()
+            .position(|label| label == "检查 pnpm")
+            .unwrap_or_else(|| panic!("插件之前要先确保 pnpm：{queue:?}"));
+        let plugins_at = queue
+            .iter()
+            .position(|label| label.starts_with("预装推荐插件"))
+            .unwrap_or_else(|| panic!("该排插件安装：{queue:?}"));
+        assert!(pnpm_at < plugins_at, "顺序不对：{queue:?}");
+
+        // 一个插件都不选时不必折腾 pnpm。
+        let mut bare = fresh(&paths);
+        onboarding_choice(&mut bare, &[]);
+        bare.handle(&json!({"kind": "onboard", "cmd": "install"}), &[]);
+        assert!(
+            !bare
+                .pending
+                .iter()
+                .any(|step| matches!(step, Step::EnsurePnpm)),
+            "没插件要装就不该装 pnpm"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugins_allow_blocked_builds_and_retry_once() {
+        let (paths, root) = scratch("pnpm-builds");
+        let mut onboard = fresh(&paths);
+        let profile = "web";
+        let dir = paths.profiles_root().join(profile);
+        std::fs::create_dir_all(&dir).expect("建 profile 目录");
+        std::fs::write(dir.join("pnpm-workspace.yaml"), "packages:\n  - .\n")
+            .expect("写 workspace");
+
+        let step = Step::InstallPlugins {
+            profile: profile.to_owned(),
+            packages: vec!["billion-context".to_owned()],
+        };
+        onboard
+            .recent
+            .push_back("  ╰─▶ Ignored build scripts: protobufjs@7.6.6".to_owned());
+        onboard.finish(
+            step.clone(),
+            Err("命令失败（退出码 Some(1)）：help: Run \"pnpm approve-builds\"".to_owned()),
+            &[],
+        );
+
+        assert!(
+            matches!(onboard.pending.front(), Some(Step::InstallPlugins { .. })),
+            "放行构建脚本后应重试插件安装"
+        );
+        assert!(onboard.builds_allowed);
+        let yaml = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).expect("读 workspace");
+        assert!(
+            yaml.contains("protobufjs: true"),
+            "该写进 allowBuilds：{yaml}"
+        );
+
+        // 再失败一次就不再重试（否则会死循环），改成给用户回执。
+        onboard.pending.clear();
+        onboard.recent.clear();
+        onboard
+            .recent
+            .push_back("  ╰─▶ Ignored build scripts: protobufjs@7.6.6".to_owned());
+        onboard.finish(step, Err("命令失败（退出码 Some(1)）".to_owned()), &[]);
+        assert!(onboard.pending.is_empty(), "不该无限重试");
+        assert!(
+            onboard
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("推荐插件没装上")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pnpm_is_looked_up_next_to_the_bundled_node() {
+        let (paths, root) = scratch("pnpm-locate");
+        let bin = paths.data.join("node").join("v24.13.0");
+        std::fs::create_dir_all(&bin).expect("建 node 目录");
+        let pnpm = bin.join("pnpm");
+        std::fs::write(&pnpm, "#!/bin/sh\n").expect("写假 pnpm");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o755))
+                .expect("加执行位");
+        }
+
+        let mut env = detect(&paths, &[], &Settings::default());
+        env.node_bin = Some(bin);
+        assert_eq!(pnpm_program(&env), Some(pnpm));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_present_pnpm_short_circuits_the_install_step() {
+        let (paths, root) = scratch("pnpm-present");
+        let mut onboard = fresh(&paths);
+        if pnpm_program(&onboard.env).is_none() {
+            // 本机没有 pnpm 时这一步会真的去装，跳过断言（CI 上就是这样）。
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        onboard.start_step(Step::EnsurePnpm);
+        assert!(
+            matches!(onboard.running, Running::Idle),
+            "已经有 pnpm 就不该再装"
+        );
+        assert!(
+            onboard
+                .log
+                .iter()
+                .any(|line| line.text.contains("pnpm 已就绪")),
+            "要告诉用户 pnpm 在哪"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn the_done_page_can_retry_just_the_plugins() {
         let (paths, root) = scratch("plugins-retry");
         let mut onboard = fresh(&paths);
@@ -2386,8 +2657,8 @@ mod tests {
         let queue: Vec<String> = onboard.pending.iter().map(Step::label).collect();
         assert_eq!(
             queue,
-            vec!["预装推荐插件（1 个）"],
-            "只该排插件这一步：{queue:?}"
+            vec!["检查 pnpm", "预装推荐插件（1 个）"],
+            "只该排「pnpm + 插件」这两步：{queue:?}"
         );
         assert!(onboard.notice.as_deref().unwrap_or("").contains("补装"));
 
