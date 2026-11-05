@@ -1598,8 +1598,10 @@ impl Onboard {
                     "command": proc.command,
                 })).collect::<Vec<_>>(),
                 "total": self.hosts.len(),
-                // 进程扫描靠 `ps`，Windows 没有；别让界面把「扫不了」显示成「没有孤儿」。
-                "scan_supported": cfg!(unix),
+                // 进程扫描：macOS/Linux 走 `ps`，Windows 走 PowerShell 的
+                // `Get-CimInstance Win32_Process`（只有它带命令行）。两边都能扫，
+                // 这个开关留给将来真不支持的平台，默认 true。
+                "scan_supported": true,
             },
             "history": self.settings.history.iter().map(|entry| json!({
                 "version": entry.version,

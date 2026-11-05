@@ -184,6 +184,23 @@ CLI 参数（`packages/bundle/web-app/src/startup.ts:64-66`）：`--host <ipv4|i
 
 **残留**：macOS/Windows 没有真机验收，`docs/m3-acceptance.md` 的结论只对 Linux 成立。
 
+### D12 Windows 上直接 spawn `node.exe`，不用 npm 的 `dsh.cmd`（✅ 已实现）
+
+**问题**：npm 在 Windows 装的 `dsh` 是批处理包装（`dsh.cmd` → `node "%~dp0\node_modules\@deepseek-ai\dsh\lib\bin.js" %*`）。直接 spawn 它，真正的子进程是 `cmd.exe`：
+
+- `Host::pid()` 记下的是 `cmd.exe` 的 pid，`host.pid` 里存的也是它；
+- 关窗时 `TerminateProcess` 只杀 `cmd.exe`，node 变成孤儿进程继续占内存 —— 用户每开一次壳就多留一个；
+- 每次启动还多开一个黑窗口。
+
+**决定**：`main.rs` 的 `direct_host_program()` 在 Windows 上把 `.cmd` / `.bat` 换成 `<prefix>\node.exe <prefix>\node_modules\@deepseek-ai\dsh\lib\bin.js`（`LaunchSpec::args_front` 保证入口脚本排在 `--profile` 之前）。找不到标准布局时退回包装脚本，不影响启动。
+
+**配套**：
+- `dsh_supervisor::kill_tree(pid)`：Windows 用 `taskkill /PID <pid> /T /F`（`TerminateProcess` 没有进程组概念，`setpgid` + 负 pid 那套不存在）；unix 仍是 `kill(-pid, SIGKILL)`。`Host::stop()` 的 Windows 分支改走它。
+- `reap_leftover_host()` 补 Windows 实现：读 `runtime_dir()/host.pid`，先用 `tasklist /FI "PID eq <pid>"` 确认那个 pid 现在真的是 `node.exe`（防 pid 复用误杀），再 `taskkill /T /F`。
+- `hostscan` 补 Windows 实现：`ps` 不存在，改问 PowerShell 的 `Get-CimInstance Win32_Process`（只有它带命令行）；`parent_alive` 也用 `tasklist` 探活 —— Windows 不会把孤儿重挂到 pid 1，父进程死了子进程的 ppid 还停在那个已消失的数字上，必须主动问。引导页的「dsh 进程」卡片因此在 Windows 上也可用（`scan_supported` 恒 true）。
+
+**代价**：Windows 上每次「重新扫描」多约 300ms（起一次 PowerShell）。**未在 Windows 真机验证**，靠 `cargo clippy --target x86_64-pc-windows-msvc` + 纯函数单测（`is_cmd_wrapper` / `dsh_entry_under` / `tasklist_has_node` / `parse_windows_json` / `looks_like_dsh` 的 Windows 形态）兜底。
+
 ## 4. 架构
 
 ```

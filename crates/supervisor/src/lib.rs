@@ -177,6 +177,28 @@ impl LaunchSpec {
         self
     }
 
+    /// 把参数插到最前面。
+    ///
+    /// Windows 上 dsh 是个 `dsh.cmd` 包装脚本；为了直接 spawn `node.exe`，
+    /// 真正的入口脚本必须排在 `--profile` 这类业务参数之前。
+    #[must_use]
+    pub fn args_front<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut front: Vec<String> = args.into_iter().map(Into::into).collect();
+        front.append(&mut self.args);
+        self.args = front;
+        self
+    }
+
+    /// 只给测试看：`Host::spawn` 之前核对参数顺序。
+    #[cfg(test)]
+    fn args_snapshot(&self) -> &[String] {
+        &self.args
+    }
+
     #[must_use]
     pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
         self.cwd = Some(dir.into());
@@ -404,9 +426,14 @@ impl Host {
         signal_group(self.pid, libc::SIGTERM);
         // Windows 没有「礼貌地请你退出」这回事：`Child::kill` 就是 TerminateProcess，
         // 立刻生效。所以别在那儿空等满 grace（退出时会明显卡一下）。
+        // 但 TerminateProcess 只管一个进程：宿主会派生子进程（pnpm、MCP 服务器、
+        // 插件里的子任务），只杀父进程会留下孤儿子进程继续占内存 —— 用 `taskkill /T`
+        // 整棵树收掉。
         #[cfg(windows)]
         {
-            let _ = self.child.kill();
+            if !kill_tree(self.pid) {
+                let _ = self.child.kill();
+            }
         }
 
         let deadline = Instant::now() + self.spec.stop_grace;
@@ -499,10 +526,61 @@ fn spawn_ready_watchdog(
     });
 }
 
+/// 杀掉整棵进程树。返回是否真的把 `taskkill` 跑成功。
+///
+/// Windows 的 `TerminateProcess` 没有「进程组」概念（POSIX 的 `setpgid` + 负 pid
+/// 那套在 Win32 不存在），`taskkill /T` 走系统级父子关系遍历，是等价的收尾手段。
+#[cfg(windows)]
+#[must_use]
+pub fn kill_tree(pid: u32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let mut cmd = Command::new("taskkill");
+    cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    dsh_platform::quiet(&mut cmd);
+    cmd.status().map(|status| status.success()).unwrap_or(false)
+}
+
+#[cfg(unix)]
+#[must_use]
+pub fn kill_tree(pid: u32) -> bool {
+    signal_group(pid, libc::SIGKILL);
+    true
+}
+
 #[cfg(unix)]
 fn signal_group(pid: u32, sig: i32) {
     // SAFETY: kill 只读两个整数参数；负 pid 表示「发给这个进程组」。
     unsafe {
         libc::kill(-(pid as i32), sig);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LaunchSpec;
+    use std::path::PathBuf;
+
+    /// Windows 上要 spawn `node.exe <bin.js> --profile web`：入口脚本必须排在
+    /// 业务参数前面，否则 node 会把 `--profile` 当成自己的参数。
+    #[test]
+    fn front_args_land_before_the_business_args() {
+        let spec = LaunchSpec::new(PathBuf::from("/prefix/node.exe"))
+            .args(["--profile", "web"])
+            .args_front(["/prefix/lib/bin.js"]);
+        assert_eq!(
+            spec.args_snapshot(),
+            ["/prefix/lib/bin.js", "--profile", "web"]
+        );
+    }
+
+    #[test]
+    fn front_args_of_an_empty_spec_are_just_the_args() {
+        let spec = LaunchSpec::new(PathBuf::from("dsh")).args_front(["--version"]);
+        assert_eq!(spec.args_snapshot(), ["--version"]);
     }
 }

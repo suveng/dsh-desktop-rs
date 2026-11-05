@@ -549,11 +549,74 @@ fn version_note(version: &str) -> Option<String> {
     ))
 }
 
+/// Windows 上把 `dsh.cmd` 换成「`node.exe` + 真入口脚本」。
+///
+/// npm 在 Windows 装的 `dsh` 是个批处理包装（`dsh.cmd` 里就是
+/// `node "%~dp0\node_modules\@deepseek-ai\dsh\lib\bin.js" %*`）。直接 spawn 它的后果：
+/// - 真正的子进程是 `cmd.exe`，`Host::pid()` 记下的是 cmd 的 pid；
+/// - 关窗时 TerminateProcess 只杀掉 cmd，node 变成孤儿进程一直占内存；
+/// - 每次启动多留一个，用户开几次就有几个。
+///
+/// 换成 `node.exe <bin.js>` 之后子进程就是 node 本身：pid 可回收，
+/// `taskkill /T` 能连着宿主派生的子进程一起收，也不再多开一个黑窗口。
+/// 这个程序是不是 npm 在 Windows 上生成的批处理包装（`dsh.cmd` / `dsh.bat`）。
+#[cfg(any(windows, test))]
+fn is_cmd_wrapper(program: &std::path::Path) -> bool {
+    program.extension().is_some_and(|ext| {
+        matches!(
+            ext.to_string_lossy().to_ascii_lowercase().as_str(),
+            "cmd" | "bat"
+        )
+    })
+}
+
+/// 包装脚本所在目录下的 dsh 真入口：`<prefix>/node_modules/@deepseek-ai/dsh/lib/bin.js`，
+/// 也就是 `dsh.cmd` 自己会去跑的那个文件。
+#[cfg(any(windows, test))]
+fn dsh_entry_under(prefix: &std::path::Path) -> Option<PathBuf> {
+    let entry = prefix
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    entry.is_file().then_some(entry)
+}
+
+#[cfg(windows)]
+fn direct_host_program(program: PathBuf) -> (PathBuf, Vec<String>) {
+    if !is_cmd_wrapper(&program) {
+        return (program, Vec::new());
+    }
+    let Some(prefix) = program.parent().map(std::path::Path::to_path_buf) else {
+        return (program, Vec::new());
+    };
+    let Some(entry) = dsh_entry_under(&prefix) else {
+        // 布局不是标准 npm 全局（比如未来换了打包方式）：退回包装脚本，
+        // 至少还能启动；退出时由 taskkill /T 兜底。
+        return (program, Vec::new());
+    };
+    let node = if prefix.join("node.exe").is_file() {
+        prefix.join("node.exe")
+    } else if let Some(found) = envcheck::find_in_path("node") {
+        found
+    } else {
+        return (program, Vec::new());
+    };
+    (node, vec![entry.to_string_lossy().into_owned()])
+}
+
+#[cfg(not(windows))]
+fn direct_host_program(program: PathBuf) -> (PathBuf, Vec<String>) {
+    (program, Vec::new())
+}
+
 /// 把 CLI + 设置变成一份启动说明。
 fn launch_spec(cli: &Cli, settings: &Settings) -> LaunchSpec {
     let (program, prefix) = host_command(cli);
-
+    let (program, entry) = direct_host_program(program);
     let mut spec = LaunchSpec::new(program)
+        .args_front(entry)
         .args(prefix)
         .args(standard_args(settings.target_profile()));
     if !cli.host_args.is_empty() {
@@ -793,7 +856,51 @@ fn reap_leftover_host() {
 }
 
 #[cfg(not(unix))]
-fn reap_leftover_host() {}
+fn reap_leftover_host() {
+    let path = host_pid_file();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    if pid <= 1 || pid == std::process::id() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    // pid 会被系统复用：动它之前先确认它真的是个 node 进程，否则可能误杀
+    // 用户别的程序。
+    if !is_node_process(pid) {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    eprintln!("dsh-desktop: 清理上次退出遗留的宿主进程树 {pid}");
+    if dsh_supervisor::kill_tree(pid) {
+        eprintln!("dsh-desktop: 已结束宿主进程树 {pid}");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `tasklist /FO CSV` 的输出里有没有 `node.exe`。
+#[cfg(any(windows, test))]
+fn tasklist_has_node(csv: &str) -> bool {
+    csv.to_ascii_lowercase().contains("node.exe")
+}
+
+/// 用 `tasklist` 确认 pid 当前是不是一个 `node.exe`。
+#[cfg(not(unix))]
+fn is_node_process(pid: u32) -> bool {
+    let mut cmd = std::process::Command::new("tasklist");
+    cmd.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    dsh_platform::quiet(&mut cmd);
+    match cmd.output() {
+        Ok(out) => tasklist_has_node(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => false,
+    }
+}
 
 /// R4：带 token 的 URL 不能**落盘**。
 ///
@@ -2327,5 +2434,56 @@ mod asset_tests {
             !ONBOARDING.contains("lines.length === lastLogLen"),
             "不要再用行数单独当键"
         );
+    }
+}
+
+/// Windows 宿主启动/回收的纯逻辑。
+///
+/// 这些分支在 macOS 上编不进去（`#[cfg(windows)]`），但判断依据——「哪个后缀算
+/// 批处理包装」「入口脚本在哪儿」「tasklist 输出里有没有 node」——都是纯函数，
+/// 抽出来就能在开发机上测；否则只能等用户在 Windows 上撞钉子。
+#[cfg(test)]
+mod host_launch_tests {
+    use super::{dsh_entry_under, is_cmd_wrapper, tasklist_has_node};
+
+    #[test]
+    fn npm_wrappers_are_the_cmd_and_bat_extensions() {
+        assert!(is_cmd_wrapper(std::path::Path::new(
+            r"C:\Users\u\AppData\Roaming\npm\dsh.cmd"
+        )));
+        assert!(is_cmd_wrapper(std::path::Path::new("/x/dsh.BAT")));
+        assert!(!is_cmd_wrapper(std::path::Path::new("/x/dsh.exe")));
+        assert!(!is_cmd_wrapper(std::path::Path::new("/x/dsh")));
+        assert!(!is_cmd_wrapper(std::path::Path::new("/x/dsh.js")));
+    }
+
+    #[test]
+    fn the_wrapper_entry_is_looked_up_next_to_the_cmd() {
+        let dir = std::env::temp_dir().join(format!("dsh-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 还没装：没有入口就不能冒然换程序，必须退回包装脚本。
+        assert!(dsh_entry_under(&dir).is_none(), "缺入口时不能乱猜");
+        let entry = dir.join("node_modules/@deepseek-ai/dsh/lib/bin.js");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "// stub\n").unwrap();
+        assert_eq!(dsh_entry_under(&dir).as_deref(), Some(entry.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tasklist_output_identifies_node() {
+        // 真实输出：`"node.exe","4242","Console","1","91,336 K"`
+        assert!(tasklist_has_node(
+            "\"node.exe\",\"4242\",\"Console\",\"1\",\"91,336 K\"\r\n"
+        ));
+        assert!(tasklist_has_node(
+            "\"NODE.EXE\",\"1\",\"Console\",\"1\",\"1 K\""
+        ));
+        assert!(!tasklist_has_node(
+            "\"chrome.exe\",\"4242\",\"Console\",\"1\",\"91,336 K\"\r\n"
+        ));
+        // pid 已经不存在 / 被复用成别的程序：不能杀。
+        assert!(!tasklist_has_node("信息: 没有运行的任务匹配指定标准。\r\n"));
+        assert!(!tasklist_has_node(""));
     }
 }
