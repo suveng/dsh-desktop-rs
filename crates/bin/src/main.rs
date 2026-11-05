@@ -2309,6 +2309,10 @@ mod asset_tests {
             "导航里要能看到这一步"
         );
         assert!(ONBOARDING.contains("S.plugins"), "快照要带 plugins 字段");
+        assert!(
+            ONBOARDING.contains("btn(\"install-plugins\""),
+            "「完成」页要有补装推荐插件的入口"
+        );
     }
 
     #[test]

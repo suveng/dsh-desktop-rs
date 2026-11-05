@@ -984,6 +984,25 @@ impl Onboard {
                 ));
                 self.rev = self.rev.wrapping_add(1);
             }
+            "install-plugins" => {
+                // 「完成」页的补装入口：预装那一步失败（比如 Windows 上 spawn 报 193）
+                // 或者用户当时取消了勾选，事后还能单点这一件事，不用整轮重装。
+                let packages = self.settings.selected_plugins();
+                self.notice = Some(if packages.is_empty() {
+                    "没有勾选推荐插件，无需补装".to_owned()
+                } else if self.busy() {
+                    "还有任务在跑，等它结束再补装".to_owned()
+                } else {
+                    let profile = self.settings.target_profile().to_owned();
+                    self.pending.push_back(Step::InstallPlugins {
+                        profile,
+                        packages: packages.clone(),
+                    });
+                    format!("开始补装 {} 个推荐插件", packages.len())
+                });
+                self.rev = self.rev.wrapping_add(1);
+                self.dirty = true;
+            }
             "scan-hosts" => {
                 self.refresh_hosts();
                 self.notice = Some(format!(
@@ -2353,6 +2372,31 @@ mod tests {
             dsh_at < plugins_at,
             "插件必须排在 dsh 后面（命令是 dsh 提供的）：{queue:?}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 「完成」页的「补装推荐插件」：不再走一遍装 dsh，只把插件步骤塞回队列。
+    #[test]
+    fn the_done_page_can_retry_just_the_plugins() {
+        let (paths, root) = scratch("plugins-retry");
+        let mut onboard = fresh(&paths);
+        onboarding_choice(&mut onboard, &["dsh-plugin-feishu"]);
+        onboard.handle(&json!({"kind": "onboard", "cmd": "install-plugins"}), &[]);
+
+        let queue: Vec<String> = onboard.pending.iter().map(Step::label).collect();
+        assert_eq!(
+            queue,
+            vec!["预装推荐插件（1 个）"],
+            "只该排插件这一步：{queue:?}"
+        );
+        assert!(onboard.notice.as_deref().unwrap_or("").contains("补装"));
+
+        // 一个都没勾时不排空任务，只给一句回执。
+        onboard.pending.clear();
+        onboarding_choice(&mut onboard, &[]);
+        onboard.handle(&json!({"kind": "onboard", "cmd": "install-plugins"}), &[]);
+        assert!(onboard.pending.is_empty());
+        assert!(onboard.notice.as_deref().unwrap_or("").contains("无需补装"));
         let _ = std::fs::remove_dir_all(root);
     }
 

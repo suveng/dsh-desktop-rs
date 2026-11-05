@@ -88,7 +88,10 @@ impl Job {
         env: &[(String, String)],
         cwd: Option<&Path>,
     ) -> std::io::Result<Self> {
-        let mut cmd = Command::new(program);
+        // Windows 上调用方给的可能是不带扩展名的 `dsh` / `pnpm`（sh 脚本），
+        // 直接 spawn 会得到 `os error 193`，这里统一换成同目录的 `.cmd` / `.exe`。
+        let program = crate::envcheck::spawnable(program).unwrap_or_else(|| program.to_path_buf());
+        let mut cmd = Command::new(&program);
         dsh_platform::quiet(&mut cmd);
         cmd.args(args)
             .stdin(Stdio::null())

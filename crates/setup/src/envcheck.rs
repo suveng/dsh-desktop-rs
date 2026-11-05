@@ -157,6 +157,30 @@ fn program_in_impl(dir: &Path, name: &str) -> Option<PathBuf> {
     is_executable(&candidate).then_some(candidate)
 }
 
+/// 把「看起来存在」的路径换成「真的能 spawn」的路径。
+///
+/// Windows 上 npm 会在同一个目录里同时铺一个无扩展名的 `dsh`（给 sh 用的文本脚本）
+/// 和一个 `dsh.cmd`（批处理包装）。`is_executable` 在 Windows 只看 `is_file()`，
+/// 于是无扩展名那个会被当成可执行文件选中 → `Command::spawn` 报
+/// `%1 不是有效的 Win32 应用程序 (os error 193)`，引导页「预装推荐插件」就是这么挂的。
+#[must_use]
+pub fn spawnable(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if path.extension().is_some() {
+            is_executable(path).then(|| path.to_path_buf())
+        } else {
+            let dir = path.parent()?;
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            program_in(dir, &name)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        is_executable(path).then(|| path.to_path_buf())
+    }
+}
+
 /// 只在给定目录里找。
 #[must_use]
 pub fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
@@ -316,8 +340,9 @@ impl Candidate {
 
     /// 解析成能直接 exec 的路径；不存在就 `None`。
     fn resolve(&self, extra: &[PathBuf]) -> Option<PathBuf> {
-        if is_executable(&self.program) {
-            return Some(self.program.clone());
+        // 走 `spawnable`：Windows 上要把无扩展名的 `dsh` 换成同目录的 `dsh.cmd`。
+        if let Some(path) = spawnable(&self.program) {
+            return Some(path);
         }
         // 只给了名字（`node` / `pnpm` / `dsh`）的，先看装好的 node 目录，再看 PATH。
         find_executable(&self.program.to_string_lossy(), extra)
@@ -360,6 +385,34 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Windows：无扩展名的 `dsh`（npm 铺的 sh 脚本）必须换成同目录的 `dsh.cmd`。
+    #[cfg(windows)]
+    #[test]
+    fn the_extensionless_sh_shim_is_never_treated_as_a_program() {
+        let dir = tempdir("spawnable");
+        fs::write(dir.join("dsh"), "#!/bin/sh\nexec node dsh.js\n").unwrap();
+        assert!(
+            spawnable(&dir.join("dsh")).is_none(),
+            "只有无扩展名的脚本时不能返回它（spawn 会报 os error 193）"
+        );
+        fs::write(dir.join("dsh.cmd"), "@echo off\r\n").unwrap();
+        assert_eq!(spawnable(&dir.join("dsh")), Some(dir.join("dsh.cmd")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 非 Windows：可执行位才是判据。
+    #[cfg(not(windows))]
+    #[test]
+    fn spawnable_requires_the_exec_bit() {
+        let dir = tempdir("spawnable");
+        let tool = fake_tool(&dir, "dsh", "#!/bin/sh\n");
+        assert_eq!(spawnable(&tool), Some(tool.clone()));
+        let plain = dir.join("dsh.txt");
+        fs::write(&plain, "not a program").unwrap();
+        assert!(spawnable(&plain).is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn fake_tool(dir: &Path, name: &str, body: &str) -> PathBuf {

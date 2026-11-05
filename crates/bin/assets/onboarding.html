@@ -397,6 +397,9 @@
       if (newest && have && newest !== have) {
         b.push(btn("goto:version", "更新到 " + newest, "", busy));
       }
+      // 预装插件那一步失败（或当时取消了勾选）时的补装入口：只跑插件，不重装 dsh。
+      const chosen = ((S.plugins || {}).selected || []);
+      b.push(btn("install-plugins", "补装推荐插件", "", busy || !chosen.length));
       b.push(btn("start", "启动", "primary", busy || !(S.env || {}).ready));
     }
     b.push(btn("open-logs", "打开日志目录", "", false));
