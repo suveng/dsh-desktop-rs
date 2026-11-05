@@ -294,6 +294,9 @@ pub struct Onboard {
     /// 已经改走 `node bin.js` 直调 dsh（绕开 npm 的 `.cmd` 垫片）。只在垫片
     /// 「一声不吭退 1」时置位，置位后本次安装不再回退，避免来回重试。
     plugins_direct: bool,
+    /// 已经退到「跳过安装脚本」（`--ignore-scripts`）重试。allowBuilds 也压不住
+    /// pnpm 的构建脚本闸门时用，保证插件至少能装上、能登记进 `dsh.profile.bundles`。
+    plugins_ignore_scripts: bool,
     dirty: bool,
 }
 
@@ -331,6 +334,7 @@ impl Onboard {
             recent: std::collections::VecDeque::new(),
             builds_allowed: false,
             plugins_direct: false,
+            plugins_ignore_scripts: false,
             dirty: true,
         }
     }
@@ -632,6 +636,27 @@ impl Onboard {
                 {
                     return Effect::None;
                 }
+                // allowBuilds 也压不住（或 YAML 那儿写不进去）时再退一步：跳过安装脚本。
+                // 插件能装上、能登记进 `dsh.profile.bundles` 才是用户此刻要的；
+                // protobufjs 这类包运行时不需要构建产物（它的 postinstall 只备 CLI）。
+                let blocked = self.blocked_builds();
+                if let Step::InstallPlugins { profile, packages } = &step
+                    && !self.plugins_ignore_scripts
+                    && !blocked.is_empty()
+                {
+                    self.plugins_ignore_scripts = true;
+                    push_log(
+                        &mut self.log,
+                        "warn",
+                        format!("{} 的安装脚本不跑了，跳过脚本重试一次", blocked.join("、")),
+                    );
+                    self.pending.push_front(Step::InstallPlugins {
+                        profile: profile.clone(),
+                        packages: packages.clone(),
+                    });
+                    self.rev = self.rev.wrapping_add(1);
+                    return Effect::None;
+                }
                 // dsh 在 Windows 上会把 stderr 丢在管道里没刷出来（process.exit），
                 // 真话只在它自己的 pnpm.log 里。零输出失败时先把日志摊给用户看。
                 if let Step::InstallPlugins { profile, .. } = &step
@@ -706,12 +731,17 @@ impl Onboard {
     /// 上一次失败是不是「pnpm 拦下了构建脚本」：是就写进 `allowBuilds` 并重跑一次。
     ///
     /// 每轮只做一次（`builds_allowed`），否则一直失败会变成死循环。
+    /// 最近这段输出里，pnpm 拦下了哪些包的构建脚本（`Ignored build scripts: …`）。
+    fn blocked_builds(&self) -> Vec<String> {
+        let output = self.recent.iter().cloned().collect::<Vec<_>>().join("\n");
+        pnpm::ignored_builds(&output)
+    }
+
     fn allow_blocked_builds(&mut self, profile: &str, retry: Step) -> bool {
         if self.builds_allowed {
             return false;
         }
-        let output = self.recent.iter().cloned().collect::<Vec<_>>().join("\n");
-        let blocked = pnpm::ignored_builds(&output);
+        let blocked = self.blocked_builds();
         if blocked.is_empty() {
             return false;
         }
@@ -967,6 +997,16 @@ impl Onboard {
                 args.extend(packages.iter().map(|name| format!("{name}@latest")));
                 if installed {
                     args.push("--force".to_owned());
+                }
+                // allowBuilds 压不住构建脚本时退到这一步：pnpm 自己保证
+                // 「包照样装好、只是不跑构建脚本、也不会因此失败」。
+                if self.plugins_ignore_scripts {
+                    args.push("--ignore-scripts".to_owned());
+                    push_log(
+                        &mut self.log,
+                        "info",
+                        "这次跳过安装脚本（--ignore-scripts），只把插件装上".to_owned(),
+                    );
                 }
                 // 上一次垫片一声不吭退 1 → 这次直接 node + bin.js。
                 let (program, args) =
@@ -1506,6 +1546,7 @@ impl Onboard {
         self.pending.clear();
         self.queued = None;
         self.plugins_direct = false;
+        self.plugins_ignore_scripts = false;
         self.error = None;
         self.notice = None;
         self.screen = Screen::Progress;
@@ -2896,8 +2937,59 @@ mod tests {
         let (paths, root) = scratch("silent-reset");
         let mut onboard = fresh(&paths);
         onboard.plugins_direct = true;
+        onboard.plugins_ignore_scripts = true;
+        onboard.builds_allowed = true;
         onboard.plan_install(&[]);
         assert!(!onboard.plugins_direct);
+        assert!(
+            !onboard.plugins_ignore_scripts,
+            "新一轮安装要重新给构建脚本机会"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// allowBuilds 也压不住 pnpm 的构建脚本闸门时，退到 `--ignore-scripts` 再试一次：
+    /// 插件能装上、能进 `dsh.profile.bundles` 比「一个都没装」强。
+    #[test]
+    fn blocked_builds_fall_back_to_ignoring_scripts_once() {
+        let (paths, root) = scratch("blocked-builds");
+        let mut onboard = fresh(&paths);
+        // 放行那条路已经试过（否则这里会先走 allow_builds）。
+        onboard.builds_allowed = true;
+        onboard
+            .recent
+            .push_back("  ╰─▶ Ignored build scripts: protobufjs@7.6.6".to_owned());
+        let step = Step::InstallPlugins {
+            profile: "web".to_owned(),
+            packages: vec!["billion-context".to_owned()],
+        };
+
+        onboard.finish(
+            step.clone(),
+            Err("命令失败（退出码 Some(1)）".to_owned()),
+            &[],
+        );
+        assert!(onboard.plugins_ignore_scripts, "应当退到跳过安装脚本");
+        assert!(
+            matches!(onboard.pending.front(), Some(Step::InstallPlugins { .. })),
+            "要重试一次"
+        );
+
+        // 跳过脚本后还失败：不再重试，别把用户困在循环里。
+        onboard.pending.clear();
+        onboard.finish(
+            step,
+            Err("命令失败（退出码 Some(1)）：别的错".to_owned()),
+            &[],
+        );
+        assert!(onboard.pending.is_empty());
+        assert!(
+            onboard
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("推荐插件没装上")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3003,12 +3095,25 @@ mod tests {
             "该写进 allowBuilds：{yaml}"
         );
 
-        // 再失败一次就不再重试（否则会死循环），改成给用户回执。
+        // 还是被拦：退到 `--ignore-scripts` 再试一次（插件装上总比一个都没有强）。
         onboard.pending.clear();
         onboard.recent.clear();
         onboard
             .recent
             .push_back("  ╰─▶ Ignored build scripts: protobufjs@7.6.6".to_owned());
+        onboard.finish(
+            step.clone(),
+            Err("命令失败（退出码 Some(1)）".to_owned()),
+            &[],
+        );
+        assert!(onboard.plugins_ignore_scripts);
+        assert!(
+            matches!(onboard.pending.front(), Some(Step::InstallPlugins { .. })),
+            "跳过脚本后再试一次"
+        );
+
+        // 第三次仍失败就不再重试（否则会死循环），改成给用户回执。
+        onboard.pending.clear();
         onboard.finish(step, Err("命令失败（退出码 Some(1)）".to_owned()), &[]);
         assert!(onboard.pending.is_empty(), "不该无限重试");
         assert!(
