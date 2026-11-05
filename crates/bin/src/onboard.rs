@@ -758,13 +758,20 @@ impl Onboard {
                 self.refresh(candidates);
                 push_log(&mut self.log, "ok", "pnpm 已安装".to_owned());
             }
-            Step::InstallPlugins { packages, .. } => {
+            Step::InstallPlugins { profile, packages } => {
                 self.refresh(candidates);
                 push_log(
                     &mut self.log,
                     "ok",
                     format!("已预装 {} 个推荐插件", packages.len()),
                 );
+                // 装上 ≠ 能用：客户端 bundle 的注册名和包名不一致时，界面会报
+                // `loaded without registering "<包名>"`（mcp-manager 早期版本就是这样）。
+                // 这里把版本读出来、顺手判一下注册名，用户不用自己翻 node_modules。
+                let dir = self.paths.profiles_root().join(&profile);
+                for (kind, text) in plugin_report(&dir, &packages) {
+                    push_log(&mut self.log, kind, text);
+                }
             }
         }
         if self.pending.is_empty() && !self.busy() {
@@ -893,13 +900,24 @@ impl Onboard {
                     push_log(&mut self.log, "warn", "找不到 dsh，跳过推荐插件".to_owned());
                     return;
                 };
+                // 一定要写 `@latest`：profile 里已经有这个包时，pnpm 会以
+                // 「Lockfile is up to date, resolution step is skipped」直接跳过，
+                // 旧版本永远留着（实测 0.1.1 → 补装后仍是 0.1.1）。已有条目再补
+                // `--force` 才会真的重新解析。
+                let dir = paths.profiles_root().join(&profile);
+                let installed = packages
+                    .iter()
+                    .any(|name| profile_has_dependency(&dir, name));
                 let mut args = vec![
                     "plugin".to_owned(),
                     "--profile".to_owned(),
-                    profile,
+                    profile.clone(),
                     "add".to_owned(),
                 ];
-                args.extend(packages);
+                args.extend(packages.iter().map(|name| format!("{name}@latest")));
+                if installed {
+                    args.push("--force".to_owned());
+                }
                 match Job::spawn(&program, &args, &env, None) {
                     Ok(job) => Running::Job { job, step },
                     Err(err) => {
@@ -1680,6 +1698,68 @@ fn looks_like_permission_problem(err: &str) -> bool {
         || lower.contains("permission denied")
         || lower.contains("permission_error")
         || err.contains("EACCES")
+}
+
+/// profile 的 `package.json` 里是不是已经有这个依赖（决定要不要 `--force`）。
+fn profile_has_dependency(profile_dir: &Path, name: &str) -> bool {
+    std::fs::read_to_string(profile_dir.join("package.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|json| {
+            json.get("dependencies")
+                .and_then(|deps| deps.get(name))
+                .cloned()
+        })
+        .is_some()
+}
+
+/// 装上之后逐个报版本；客户端 bundle 里连自己的包名都没有，说明是注册名不对的旧版。
+///
+/// 返回 `(日志级别, 文本)`：`ok` = 正常，`warn` = 装了但界面会报「loaded without registering」。
+fn plugin_report(profile_dir: &Path, packages: &[String]) -> Vec<(&'static str, String)> {
+    let mut lines = Vec::new();
+    for name in packages {
+        let root = profile_dir.join("node_modules").join(name);
+        let version = std::fs::read_to_string(root.join("package.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|json| {
+                json.get("version")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+        let Some(version) = version else {
+            lines.push((
+                "warn",
+                format!("{name} 没找到（node_modules 里没有它），界面里可能出不来"),
+            ));
+            continue;
+        };
+        // 客户端 bundle 的位置各家不一样，常见就这几种。
+        let bundle = ["lib/client.js", "dist/client.js", "client.js"]
+            .iter()
+            .map(|rel| root.join(rel))
+            .find(|path| path.is_file());
+        let registered = bundle
+            .as_ref()
+            .map(|path| {
+                std::fs::read_to_string(path)
+                    .map(|code| code.contains(name.as_str()))
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        if registered {
+            lines.push(("ok", format!("{name} {version}")));
+        } else {
+            lines.push((
+                "warn",
+                format!(
+                    "{name} {version} 的客户端注册名不对（界面会报 loaded without registering），执行 `dsh plugin --profile web add {name}@latest` 升级"
+                ),
+            ));
+        }
+    }
+    lines
 }
 
 /// `finish` 判读失败原因时回看的输出行数。
@@ -2520,6 +2600,74 @@ mod tests {
     }
 
     /// 「完成」页的「补装推荐插件」：不再走一遍装 dsh，只把插件步骤塞回队列。
+    #[test]
+    fn plugin_install_always_asks_for_latest() {
+        let (paths, root) = scratch("plugin-latest");
+        let dir = paths.profiles_root().join("web");
+        std::fs::create_dir_all(&dir).expect("建 profile 目录");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"web","dependencies":{"dsh-plugin-feishu":"0.6.2"}}"#,
+        )
+        .expect("写 package.json");
+        assert!(profile_has_dependency(&dir, "dsh-plugin-feishu"));
+        assert!(!profile_has_dependency(&dir, "billion-context"));
+
+        // 装过 ⇒ 必须 --force，否则 pnpm 会跳过解析、旧版本原地不动。
+        let mut onboard = fresh(&paths);
+        onboard.handle(&json!({"kind": "onboard", "cmd": "install-plugins"}), &[]);
+        assert!(
+            onboard
+                .pending
+                .iter()
+                .any(|step| matches!(step, Step::InstallPlugins { .. }))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_plugin_step_reports_versions_and_flags_stale_bundles() {
+        let (paths, root) = scratch("plugin-report");
+        let dir = paths.profiles_root().join("web");
+        let write = |name: &str, version: &str, bundle: &str| {
+            let pkg = dir.join("node_modules").join(name);
+            std::fs::create_dir_all(pkg.join("lib")).expect("建插件目录");
+            std::fs::write(
+                pkg.join("package.json"),
+                format!("{{\"name\":\"{name}\",\"version\":\"{version}\"}}"),
+            )
+            .expect("写 package.json");
+            std::fs::write(pkg.join("lib/client.js"), bundle).expect("写客户端 bundle");
+        };
+        write(
+            "suveng-dsh-plugin-mcp-manager",
+            "0.1.1",
+            "register({ id: \"dsh-plugin-mcp-manager\" })",
+        );
+        write(
+            "dsh-plugin-feishu",
+            "0.6.2",
+            "register({ id: \"dsh-plugin-feishu\" })",
+        );
+
+        let report = plugin_report(
+            &dir,
+            &[
+                "suveng-dsh-plugin-mcp-manager".to_owned(),
+                "dsh-plugin-feishu".to_owned(),
+                "billion-context".to_owned(),
+            ],
+        );
+        assert_eq!(report.len(), 3);
+        assert_eq!(report[0].0, "warn", "注册名不对的旧版要告警");
+        assert!(report[0].1.contains("0.1.1"));
+        assert!(report[0].1.contains("suveng-dsh-plugin-mcp-manager@latest"));
+        assert_eq!(report[1].1, "dsh-plugin-feishu 0.6.2");
+        assert_eq!(report[2].0, "warn", "没装上的也要说清楚");
+        assert!(report[2].1.contains("没找到"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn install_queues_pnpm_before_the_plugins() {
         let (paths, root) = scratch("pnpm-order");

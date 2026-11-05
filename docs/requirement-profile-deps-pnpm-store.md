@@ -133,3 +133,35 @@ Windows 用户装完 dsh 后「预装推荐插件」失败，排查出两件与 
 `allow_builds_appends_a_block_to_a_file_without_one`、`allow_builds_merges_into_the_existing_block`、
 `onboard::tests::install_queues_pnpm_before_the_plugins`、
 `plugins_allow_blocked_builds_and_retry_once`、`pnpm_is_looked_up_next_to_the_bundled_node`。
+
+## 9. 补记：插件装上了但界面报 `loaded without registering`（2026-11-05）
+
+Windows 用户装完插件后界面提示：
+
+```
+suveng-dsh-plugin-mcp-manager: import failed: client-modules: could not load "..."
+  : already executed without registering "suveng-dsh-plugin-mcp-manager"
+  : loaded without registering "suveng-dsh-plugin-mcp-manager" via __ModuleLoader__.load
+```
+
+两件事：
+
+1. **版本旧了。** `dsh-client-modules` 按**包名**索引客户端 bundle，而 mcp-manager
+   0.1.0 / 0.1.1 的 `lib/client.js` 注册的是 `id: "dsh-plugin-mcp-manager"`
+   （少了 `suveng-` 前缀）。0.1.2 已修（`063d3a5`），但用户机器上还是旧版。
+2. **`dsh plugin add <包名>` 不会升级已有依赖。** 实测 pnpm 12：profile 里已经
+   有 `suveng-dsh-plugin-mcp-manager: 0.1.1` 时，`pnpm add suveng-dsh-plugin-mcp-manager`
+   甚至 `@latest` 都只输出 `Lockfile is up to date, resolution step is skipped`，
+   版本原地不动。必须 `pnpm add <pkg>@latest --force` 或 `pnpm update <pkg> --latest`。
+
+壳侧的处置（`crates/bin/src/onboard.rs` 的 `Step::InstallPlugins`）：
+
+- 安装参数一律写成 `<包名>@latest`；
+- profile 的 `package.json` 里已有该依赖时追加 `--force`（否则升级不生效）；
+- 装完后 `plugin_report()` 逐个读出 `node_modules/<包名>/package.json` 的版本写进日志，
+  并检查客户端 bundle 里是否出现自己的包名 —— 没出现就告警并给出
+  `dsh plugin --profile web add <包名>@latest` 的修法。
+
+2026-11-05 审计过的推荐插件最新版（都正常注册）：
+`suveng-dsh-plugin-memory` 0.5.39、`suveng-dsh-plugin-mcp-manager` 0.1.2、
+`dsh-plugin-feishu` 0.7.1、`billion-context` 0.1.212（host-plane 插件，没有客户端 bundle）。
