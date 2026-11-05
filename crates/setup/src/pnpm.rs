@@ -248,6 +248,19 @@ fn package_name(spec: &str) -> Option<&str> {
     ok.then_some(name)
 }
 
+/// 已知需要跑安装脚本的包，第一次装就直接放行。
+///
+/// `protobufjs` 是 `billion-context` 的传递依赖，它的 postinstall 只备 CLI，
+/// 但 pnpm 12 的非交互模式一律拦（`ERR_PNPM_IGNORED_BUILDS`）。先写白名单，
+/// 用户就不用看那一轮失败重试了。
+pub const SEED_BUILDS: &[&str] = &["protobufjs"];
+
+/// 预放行 [`SEED_BUILDS`]，第一次装插件就别撞闸门。返回真正新增的包。
+pub fn seed_allow_builds(profile: &Path) -> io::Result<Vec<String>> {
+    let names: Vec<String> = SEED_BUILDS.iter().map(|name| (*name).to_owned()).collect();
+    allow_builds(profile, &names)
+}
+
 /// 把包名写进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds` 白名单，返回真正新增的。
 ///
 /// 这是 [`fix_pending_builds`] 的补充：那个只管「占位符」形态，pnpm 12 干脆不写
@@ -543,6 +556,26 @@ minimumReleaseAgeExclude:
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// 第一次装插件前就把已知会跑脚本的包放行，用户不必看那轮「失败 → 重试」。
+    #[test]
+    fn seeding_allow_builds_happens_before_the_first_install() {
+        let profile = tempdir("allow-seed");
+        let added = seed_allow_builds(&profile).unwrap();
+        assert_eq!(
+            added,
+            SEED_BUILDS
+                .iter()
+                .map(|n| (*n).to_owned())
+                .collect::<Vec<_>>()
+        );
+        let text = fs::read_to_string(profile.join("pnpm-workspace.yaml")).unwrap();
+        assert!(text.contains("protobufjs: true"), "{text}");
+        // 再来一次是空操作，不会写重复项。
+        assert!(seed_allow_builds(&profile).unwrap().is_empty());
+        let text = fs::read_to_string(profile.join("pnpm-workspace.yaml")).unwrap();
+        assert_eq!(text.matches("protobufjs: true").count(), 1);
     }
 
     #[test]

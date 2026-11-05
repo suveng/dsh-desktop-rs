@@ -529,13 +529,19 @@ impl Onboard {
             Running::Idle => {}
             Running::Job { job, step } => {
                 let outcome = job.poll();
+                // 插件这一步的输出先只攒进 `recent`：失败会自动放行/跳过脚本重试，
+                // 把中间那轮的红字摊到用户眼前只会让人以为装坏了。真放弃了才整段
+                // 倒出来（见 `finish` 的放弃分支）。
+                let quiet = matches!(step, Step::InstallPlugins { .. });
                 for (stream, line) in &outcome.lines {
                     let kind = if *stream == Stream::Stderr {
                         "err"
                     } else {
                         "out"
                     };
-                    push_log(&mut self.log, kind, line.clone());
+                    if !quiet {
+                        push_log(&mut self.log, kind, line.clone());
+                    }
                     // 失败原因可能藏在中间某行（pnpm 的 `Ignored build scripts:` 就是），
                     // 所以留一份最近的原始输出给 `finish` 判读。
                     if self.recent.len() == RECENT_LINES {
@@ -694,6 +700,9 @@ impl Onboard {
                 }
                 // 插件装不上也不能抦住主流程：dsh 已经能用，用户之后还能在插件市场里补。
                 if matches!(step, Step::InstallPlugins { .. }) {
+                    for line in std::mem::take(&mut self.recent) {
+                        push_log(&mut self.log, "err", line);
+                    }
                     push_log(&mut self.log, "warn", format!("预装推荐插件失败：{err}"));
                     self.notice =
                         Some("推荐插件没装上，dsh 本身没事，可以稍后从插件市场重试".to_owned());
@@ -985,6 +994,17 @@ impl Onboard {
                 // 旧版本永远留着（实测 0.1.1 → 补装后仍是 0.1.1）。已有条目再补
                 // `--force` 才会真的重新解析。
                 let dir = paths.profiles_root().join(&profile);
+                // pnpm 12 非交互模式一律拦需要跑安装脚本的包（`protobufjs` 就是），
+                // 拦下来只是退 1、包其实已经装好。先把已知的先放行，第一次就过。
+                if let Ok(seeded) = pnpm::seed_allow_builds(&dir)
+                    && !seeded.is_empty()
+                {
+                    push_log(
+                        &mut self.log,
+                        "info",
+                        format!("已预先放行 {} 的安装脚本", seeded.join("、")),
+                    );
+                }
                 let installed = packages
                     .iter()
                     .any(|name| profile_has_dependency(&dir, name));
