@@ -2127,11 +2127,22 @@ mod tests {
 
         assert!(onboard.error.is_none(), "不该失败：{:?}", onboard.error);
         let calls = std::fs::read_to_string(&calls).expect("npm 被调用了");
-        let runs: Vec<&str> = calls.lines().collect();
+        // 装完 dsh 还会走一步「检查 pnpm」：机器上没有 pnpm 时会再调一次
+        // `npm install -g pnpm`（CI 上就没有，开发机上通常有）。这里只核对
+        // dsh 的两次安装顺序，pnpm 那步单独断言。
+        let runs: Vec<&str> = calls
+            .lines()
+            .filter(|line| !line.contains("install -g pnpm"))
+            .collect();
         assert_eq!(runs.len(), 2, "应当先试全局、再退用户目录：{calls}");
         assert!(!runs[0].contains("--prefix"), "{calls}");
         assert!(runs[1].contains("--prefix"), "{calls}");
         assert!(log_text(&onboard).contains("改装到用户目录"));
+        let pnpm_runs = calls
+            .lines()
+            .filter(|l| l.contains("install -g pnpm"))
+            .count();
+        assert!(pnpm_runs <= 1, "pnpm 最多试装一次（已有就跳过）：{calls}");
         let _ = std::fs::remove_dir_all(root);
     }
 

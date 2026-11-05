@@ -10,3 +10,8 @@ repository.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# 单实例的「pid 还活着吗」探活要真的问系统：Linux 有 /proc，macOS 只有
+# `kill(pid, 0)`，Windows 得走 tasklist。libc 只在 unix 上需要。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
