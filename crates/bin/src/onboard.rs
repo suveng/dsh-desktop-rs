@@ -291,6 +291,9 @@ pub struct Onboard {
     recent: std::collections::VecDeque<String>,
     /// 这一轮已经替用户放行过被拦的构建脚本：防止「放行 → 重试 → 又失败」死循环。
     builds_allowed: bool,
+    /// 已经改走 `node bin.js` 直调 dsh（绕开 npm 的 `.cmd` 垫片）。只在垫片
+    /// 「一声不吭退 1」时置位，置位后本次安装不再回退，避免来回重试。
+    plugins_direct: bool,
     dirty: bool,
 }
 
@@ -327,6 +330,7 @@ impl Onboard {
             deps_log: String::new(),
             recent: std::collections::VecDeque::new(),
             builds_allowed: false,
+            plugins_direct: false,
             dirty: true,
         }
     }
@@ -546,7 +550,13 @@ impl Onboard {
                         finished = Some((step, Ok(String::new())));
                     } else {
                         let tail = job.stderr_tail().to_owned();
-                        finished = Some((step, Err(describe_failure(&tail, code))));
+                        let mut err = describe_failure(&tail, code);
+                        if self.recent.is_empty() {
+                            // 一个字都没输出：以前用户只能看到「命令失败（退出码 1）」，
+                            // 完全没法自查。把这条信息显式写出来。
+                            err.push_str("（命令没有任何输出）");
+                        }
+                        finished = Some((step, Err(err)));
                     }
                 }
             }
@@ -620,6 +630,25 @@ impl Onboard {
                         },
                     )
                 {
+                    return Effect::None;
+                }
+                // 插件：`dsh.cmd` 垫片零输出退 1（Windows 上见过）时换 node 直调再来一次，
+                // 拿到真正的报错，也别让用户第一次安装就少插件。
+                if let Step::InstallPlugins { profile, packages } = &step
+                    && !self.plugins_direct
+                    && self.recent.is_empty()
+                {
+                    self.plugins_direct = true;
+                    push_log(
+                        &mut self.log,
+                        "warn",
+                        "dsh 没有输出就退出了，改用 node 直接调用重试一次".to_owned(),
+                    );
+                    self.pending.push_front(Step::InstallPlugins {
+                        profile: profile.clone(),
+                        packages: packages.clone(),
+                    });
+                    self.rev = self.rev.wrapping_add(1);
                     return Effect::None;
                 }
                 // 插件装不上也不能抦住主流程：dsh 已经能用，用户之后还能在插件市场里补。
@@ -918,6 +947,25 @@ impl Onboard {
                 if installed {
                     args.push("--force".to_owned());
                 }
+                // 上一次垫片一声不吭退 1 → 这次直接 node + bin.js。
+                let (program, args) =
+                    match self.plugins_direct.then(|| direct_dsh_command(&self.env)) {
+                        Some(Some((node, mut prelude))) => {
+                            push_log(
+                                &mut self.log,
+                                "info",
+                                "改用 node 直接调用 dsh（绕开 npm 的 .cmd 包装）".to_owned(),
+                            );
+                            prelude.extend(args);
+                            (node, prelude)
+                        }
+                        _ => (program, args),
+                    };
+                push_log(
+                    &mut self.log,
+                    "info",
+                    format!("$ {} {}", program.display(), args.join(" ")),
+                );
                 match Job::spawn(&program, &args, &env, None) {
                     Ok(job) => Running::Job { job, step },
                     Err(err) => {
@@ -1436,6 +1484,7 @@ impl Onboard {
     fn plan_install(&mut self, candidates: &[envcheck::Candidate]) {
         self.pending.clear();
         self.queued = None;
+        self.plugins_direct = false;
         self.error = None;
         self.notice = None;
         self.screen = Screen::Progress;
@@ -1775,6 +1824,28 @@ fn pnpm_program(env: &EnvReport) -> Option<PathBuf> {
         return Some(candidate);
     }
     envcheck::find_in_path("pnpm")
+}
+
+/// `node` + dsh 的入口脚本：绕开 npm 生成的 `.cmd` 垫片，直接用 node 跑。
+///
+/// Windows 上 `dsh.cmd` 是 npm 写的批处理（内部靠 `title %COMSPEC%` 那套跳转），
+/// 在 `CREATE_NO_WINDOW` 的无控制台环境里有几率**一个字都不输出就退 1**。实测日志
+/// 就是这样：`⟳ 预装推荐插件（4 个）` 紧跟着 `命令失败（退出码 Some(1)）`，中间
+/// 一行输出都没有 —— 用户完全没法自救。改走 `node <prefix>/node_modules/
+/// @deepseek-ai/dsh/lib/bin.js`，既绕开垫片，也能把真正的错误信息带回来。
+fn direct_dsh_command(env: &EnvReport) -> Option<(PathBuf, Vec<String>)> {
+    let bin = env.node_bin.as_ref()?;
+    let entry = bin
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    if !entry.is_file() {
+        return None;
+    }
+    let node = envcheck::program_in(bin, "node")?;
+    Some((node, vec![entry.display().to_string()]))
 }
 
 /// npm 在哪：优先我们装的 node 旁边的 npm，其次 PATH。
@@ -2709,6 +2780,57 @@ mod tests {
                 .any(|step| matches!(step, Step::EnsurePnpm)),
             "没插件要装就不该装 pnpm"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    /// Windows 上 npm 的 `dsh.cmd` 垫片会「一个字不输出就退 1」，老逻辑只能告诉用户
+    /// 「命令失败（退出码 1）」然后跳过插件 —— 换成 node 直调能拿到真报错。
+    fn a_silent_plugin_failure_retries_through_node_once() {
+        let (paths, root) = scratch("silent-plugins");
+        let mut onboard = fresh(&paths);
+        let step = Step::InstallPlugins {
+            profile: "web".to_owned(),
+            packages: vec!["billion-context".to_owned()],
+        };
+
+        onboard.finish(
+            step.clone(),
+            Err("命令失败（退出码 Some(1)）（命令没有任何输出）".to_owned()),
+            &[],
+        );
+        assert!(
+            matches!(onboard.pending.front(), Some(Step::InstallPlugins { .. })),
+            "零输出失败应改直调重试"
+        );
+        assert!(onboard.plugins_direct);
+
+        // 直调也失败：不再重试，给用户一句能看懂的回执。
+        onboard.pending.clear();
+        onboard.finish(
+            step,
+            Err("命令失败（退出码 Some(1)）：ERR_PNPM_IGNORED_BUILDS".to_owned()),
+            &[],
+        );
+        assert!(onboard.pending.is_empty(), "不该来回重试");
+        assert!(
+            onboard
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("推荐插件没装上")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 新一轮安装要把「直调」开关复位，否则用户重新点「开始安装」时会莫名走 node。
+    #[test]
+    fn planning_an_install_resets_the_direct_plugin_mode() {
+        let (paths, root) = scratch("silent-reset");
+        let mut onboard = fresh(&paths);
+        onboard.plugins_direct = true;
+        onboard.plan_install(&[]);
+        assert!(!onboard.plugins_direct);
         let _ = std::fs::remove_dir_all(root);
     }
 
