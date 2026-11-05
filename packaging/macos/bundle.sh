@@ -101,7 +101,32 @@ cp -R "$APP_DIR" "$DMG_STAGE/"
 # 拖拽安装习惯：dmg 里放一个 /Applications 别名。
 ln -sfn /Applications "$DMG_STAGE/Applications"
 DMG="$ROOT/target/package/$APP-$VERSION-macos-$ARCH.dmg"
-hdiutil create -volname "DeepSeek Harness" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG" >/dev/null
+
+# hdiutil 会先造一个临时读写镜像、挂到 /Volumes 下再压缩。GitHub 的 macOS
+# runner 上这一步很爱报 `hdiutil: create failed - Resource busy`（同名卷还挂着
+# 或 Spotlight 正在索引 srcfolder），整个发布就断在这儿（v0.1.21 就是这么挂的：
+# linux/windows 都绿，macos 的 Bundle 步失败，publish 被 skip）。所以：
+# 每次失败先强行卸载同名卷再重试，第三次改用带版本号的卷名，彻底避开撞名。
+make_dmg() {
+  local attempt vol err
+  for attempt in 1 2 3; do
+    case $attempt in
+      1|2) vol="DeepSeek Harness" ;;
+      *) vol="DeepSeek Harness $VERSION" ;;
+    esac
+    err="$ROOT/target/package/dmg.err"
+    if hdiutil create -volname "$vol" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DMG" >/dev/null 2>"$err"; then
+      return 0
+    fi
+    echo "!! dmg 第 $attempt 次失败（卷名 $vol）：$(tr '\n' ' ' < "$err")" >&2
+    hdiutil detach "/Volumes/DeepSeek Harness" -force >/dev/null 2>&1 || true
+    rm -f "$DMG"
+    sleep $((attempt * 5))
+  done
+  return 1
+}
+
+make_dmg
 cp "$DMG" "$DIST/"
 echo "built $DIST/$APP-$VERSION-macos-$ARCH.dmg"
 
