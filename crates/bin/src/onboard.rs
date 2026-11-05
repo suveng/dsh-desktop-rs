@@ -632,6 +632,22 @@ impl Onboard {
                 {
                     return Effect::None;
                 }
+                // dsh 在 Windows 上会把 stderr 丢在管道里没刷出来（process.exit），
+                // 真话只在它自己的 pnpm.log 里。零输出失败时先把日志摊给用户看。
+                if let Step::InstallPlugins { profile, .. } = &step
+                    && self.recent.is_empty()
+                    && let Some((path, tail)) =
+                        plugin_diagnostics(&self.paths.profiles_root().join(profile))
+                {
+                    push_log(
+                        &mut self.log,
+                        "err",
+                        format!("dsh 诊断日志 {}：", path.display()),
+                    );
+                    for line in tail.lines() {
+                        push_log(&mut self.log, "err", line.to_owned());
+                    }
+                }
                 // 插件：`dsh.cmd` 垫片零输出退 1（Windows 上见过）时换 node 直调再来一次，
                 // 拿到真正的报错，也别让用户第一次安装就少插件。
                 if let Step::InstallPlugins { profile, packages } = &step
@@ -823,7 +839,12 @@ impl Onboard {
         self.rev = self.rev.wrapping_add(1);
         self.recent.clear();
         push_log(&mut self.log, "info", format!("⟳ {}", step.label()));
-        let env = self.settings.install_env();
+        // pnpm 只在我们装的 node 前缀里，不在系统 PATH 上；不给子进程补上，
+        // dsh plugin 内部的 pnpm 转发会以 ENOENT 失败（见 with_path_prefixed）。
+        let mut env = self.settings.install_env();
+        if let Some(bin) = &self.env.node_bin {
+            env = with_path_prefixed(env, bin);
+        }
         let paths = self.paths.clone();
 
         let running = match step.clone() {
@@ -1848,6 +1869,52 @@ fn direct_dsh_command(env: &EnvReport) -> Option<(PathBuf, Vec<String>)> {
     Some((node, vec![entry.display().to_string()]))
 }
 
+/// 把一份目录顶到这个子进程的 PATH 最前面。
+///
+/// pnpm 跟 dsh 一起装在**我们自己**的 node 前缀里（`<data>/node/vX/bin`），这个
+/// 目录不在系统 PATH 上。dsh 的 `plugin` 子命令内部要 `execa("pnpm")` 转发给 pnpm，
+/// 找不到就是 ENOENT —— 实测（macOS 复现）：
+/// `Command failed with ENOENT: pnpm remove …` / `spawn pnpm ENOENT`，
+/// 退出非零。Windows 上更糟：dsh 末尾 `process.exit()` 会把还没刷进管道的
+/// stderr 一起丢掉，于是壳这边只看到「退出码 1、零输出」（用户 11-05 07:15 的日志）。
+fn with_path_prefixed(env: Vec<(String, String)>, dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut env = env;
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let joined = std::env::join_paths(
+        std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current)),
+    )
+    .unwrap_or_else(|_| dir.as_os_str().to_owned());
+    env.retain(|(key, _)| key != "PATH");
+    env.push(("PATH".to_owned(), joined.to_string_lossy().into_owned()));
+    env
+}
+
+/// dsh 把插件操作的细节写在 `<profile>/.plugin-manager/logs/operation-*/pnpm.log`。
+/// 失败时把最新那份的末尾几行捞出来 —— 这是 Windows 上唯一能看到真话的地方。
+fn plugin_diagnostics(dir: &std::path::Path) -> Option<(PathBuf, String)> {
+    let root = dir.join(".plugin-manager").join("logs");
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&root).ok()?.flatten() {
+        let log = entry.path().join("pnpm.log");
+        let Ok(meta) = std::fs::metadata(&log) else {
+            continue;
+        };
+        let at = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().is_none_or(|(best, _)| at > *best) {
+            newest = Some((at, log));
+        }
+    }
+    let (_, path) = newest?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(12);
+    Some((path.clone(), lines[start..].join("\n")))
+}
+
 /// npm 在哪：优先我们装的 node 旁边的 npm，其次 PATH。
 fn npm_program(env: &EnvReport) -> PathBuf {
     if let Some(bin) = &env.node_bin {
@@ -2831,6 +2898,74 @@ mod tests {
         onboard.plugins_direct = true;
         onboard.plan_install(&[]);
         assert!(!onboard.plugins_direct);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 我们自己装的 node 前缀（pnpm 就躺在里面）必须排到子进程 PATH 最前面，
+    /// 否则 dsh 内部 execa("pnpm") 直接 ENOENT。
+    #[test]
+    fn the_plugin_path_puts_our_node_first() {
+        let bin = PathBuf::from("/opt/dsh/node/v24.13.0");
+        let env = with_path_prefixed(
+            vec![("HTTPS_PROXY".to_owned(), "http://127.0.0.1:1".to_owned())],
+            &bin,
+        );
+        let path = env
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+            .expect("子进程 PATH 要显式给出");
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs.first(), Some(&bin), "前缀必须在最前");
+        assert_eq!(
+            dirs.iter().filter(|dir| **dir == bin).count(),
+            1,
+            "重复调用不该把同一目录塞两遍"
+        );
+        assert!(dirs.len() > 1, "原来的 PATH 要保留");
+        assert!(
+            env.iter().any(|(key, _)| key == "HTTPS_PROXY"),
+            "代理设置不能丢"
+        );
+        // 再套一层不该叠出两条 PATH。
+        let env = with_path_prefixed(env, &bin);
+        assert_eq!(env.iter().filter(|(key, _)| key == "PATH").count(), 1);
+    }
+
+    /// dsh 的插件失败细节只在 `<profile>/.plugin-manager/logs/operation-*/pnpm.log` 里；
+    /// 挑最新那份，给末尾几行，且不把空行算进配额。
+    #[test]
+    fn the_newest_plugin_log_is_surfaced() {
+        let (paths, root) = scratch("plugin-log");
+        let logs = paths.profiles_root().join("web/.plugin-manager/logs");
+        let old = logs.join("operation-old");
+        let fresh = logs.join("operation-new");
+        std::fs::create_dir_all(&old).expect("建老日志目录");
+        std::fs::write(old.join("pnpm.log"), "老日志不该被选\n").expect("写老日志");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(&fresh).expect("建新日志目录");
+        std::fs::write(
+            fresh.join("pnpm.log"),
+            "ERR_PNPM_IGNORED_BUILDS  Ignored build scripts: protobufjs\n\nDone\n",
+        )
+        .expect("写新日志");
+        // 没有 pnpm.log 的目录要被跳过。
+        std::fs::create_dir_all(logs.join("operation-empty")).expect("建空日志目录");
+
+        let (path, tail) = plugin_diagnostics(&paths.profiles_root().join("web"))
+            .expect("应当找到最新那份 pnpm.log");
+        assert_eq!(path, fresh.join("pnpm.log"));
+        assert!(
+            tail.contains("ERR_PNPM_IGNORED_BUILDS"),
+            "末几行要带真报错：{tail}"
+        );
+        assert!(!tail.contains("老日志"), "不能取老的那份");
+        assert!(!tail.contains("\n\n"), "空行不进日志面板");
+
+        assert!(
+            plugin_diagnostics(&paths.profiles_root().join("nope")).is_none(),
+            "没有 profile 目录时安静返回"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
