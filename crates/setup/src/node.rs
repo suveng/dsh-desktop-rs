@@ -5,7 +5,7 @@
 //! 自己装一份到 `~/.local/share/dsh-desktop-rs/node/<version>` 最省事，也不污染系统。
 
 use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -159,7 +159,15 @@ pub fn verify_shasum(shasums: &str, asset: &str, actual_hex: &str) -> Result<(),
 pub fn sha256_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
+    // `sha2` 0.11 起 `Sha256` 不再实现 `io::Write`，只能自己喂缓冲。
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
     Ok(hasher
         .finalize()
         .iter()
